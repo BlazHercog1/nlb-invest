@@ -1,0 +1,33 @@
+# Python bytecode, environments and test artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local source documents and generated reports may contain personal information.
+*.pdf
+latest_report*.txt
+latest_report*.json
+ticker_cache.json
+reports/
+local/
+private/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
