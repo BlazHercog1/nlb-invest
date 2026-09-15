@@ -1,4 +1,4 @@
-﻿"""Verify dashboard calculations and failed-refresh preservation without network."""
+"""Verify dashboard calculations and failed-refresh preservation without network."""
 import importlib.util
 import tempfile
 import unittest
@@ -6,8 +6,8 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-import dashboard_data as data
-from investment_tracker import FUNDS, NavPoint
+from dashboard import data
+from nlb_invest.models import FUNDS, NavPoint
 
 
 class DashboardDataTests(unittest.TestCase):
@@ -57,7 +57,7 @@ class DashboardInterfaceTests(unittest.TestCase):
             settings = {"return_since": "2026-08-19", "amounts": {key: 1000 for key in FUNDS}}
             (local / "report.pdf").write_bytes(b"test")
             with patch.object(data, "ROOT", local), patch.object(data, "LOCAL", local), patch.object(data, "SETTINGS_PATH", local / "settings.json"), patch.object(data, "load_report", return_value=report), patch.object(data, "load_settings", return_value=settings), patch.object(data, "refresh_report") as refresh:
-                app = AppTest.from_file(str(Path(__file__).parent / "dashboard.py"), default_timeout=30).run()
+                app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "dashboard" / "app.py"), default_timeout=30).run()
                 self.assertEqual(len(app.exception), 0)
                 self.assertEqual(app.metric[0].value, "EUR 3,000.00")
                 self.assertEqual(len(app.get("plotly_chart")), 1)

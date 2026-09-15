@@ -1,5 +1,6 @@
-﻿"""Start the local dashboard and open its page once the server is ready."""
+"""Start the local dashboard and open its page once the server is ready."""
 import sys
+from pathlib import Path
 import threading
 import time
 import urllib.error
@@ -22,11 +23,15 @@ def open_when_ready():
             time.sleep(1)
 
 
-if __name__ == "__main__":
+def main():
     threading.Thread(target=open_when_ready, daemon=True).start()
     sys.argv = [
-        "streamlit", "run", "dashboard.py",
+        "streamlit", "run", str(Path(__file__).with_name("app.py")),
         "--server.address", "127.0.0.1", "--server.port", "8501",
         "--server.headless", "true", "--browser.gatherUsageStats", "false",
     ]
-    sys.exit(cli.main())
+    return cli.main()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

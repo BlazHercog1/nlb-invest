@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nlb-invest"
+version = "0.1.0"
+description = "Track NLB fund NAVs and estimate equity holding contributions."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["pypdf>=5.0"]
+
+[project.optional-dependencies]
+dashboard = [
+    "streamlit>=1.50,<2",
+    "plotly>=5.24,<7",
+]
+
+[project.scripts]
+nlb-invest = "nlb_invest.cli:main"
+nlb-dashboard = "dashboard.launch:main"
+
+[tool.setuptools]
+packages = ["nlb_invest", "dashboard"]
+
+[tool.setuptools.package-dir]
+nlb_invest = "src/nlb_invest"
+dashboard = "dashboard"

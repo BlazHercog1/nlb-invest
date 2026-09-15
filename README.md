@@ -18,7 +18,7 @@ The tracker uses Python 3.10+ and the pure-Python `pypdf` package. It does not r
 Poppler, MiKTeX, or `pdftotext`. Install the Python dependency once:
 
 ```powershell
-py -3 -m pip install -r requirements.txt
+py -3 -m pip install -e .
 ```
 
 Monthly source PDFs are not included in the repository. Obtain a monthly holdings
@@ -29,7 +29,7 @@ not support arbitrary PDFs or other providers.
 Then run the tracker with your local report:
 
 ```powershell
-py -3 investment_tracker.py --pdf "path/to/monthly_report.pdf"
+py -3 -m nlb_invest --pdf "path/to/monthly_report.pdf"
 ```
 
 On macOS/Linux, use `python3` instead of `py -3` in the commands below.
@@ -50,7 +50,7 @@ The personal tracking is intentionally simple: enter how much money you invested
 The tracker treats those amounts as invested from the `--return-since` date. By default that date is `2026-08-19`; change it if your invested amount should be measured from another day.
 
 ```powershell
-py -3 investment_tracker.py `
+py -3 -m nlb_invest `
   --pdf Mesecno_porocilo_Julij_2026.pdf `
   --fund tech `
   --fund balanced `
@@ -64,35 +64,35 @@ py -3 investment_tracker.py `
 JSON output includes the existing `funds` array plus a top-level `investment_summary` when invested amounts are provided:
 
 ```powershell
-py -3 investment_tracker.py --format json --output latest_report.json
+py -3 -m nlb_invest --format json --output latest_report.json
 ```
 
 Useful options:
 
 ```powershell
 # Estimate your current value when you know how much money you invested
-py -3 investment_tracker.py --invested-tech 1000 --invested-balanced 1000 --invested-developed 1000
+py -3 -m nlb_invest --invested-tech 1000 --invested-balanced 1000 --invested-developed 1000
 
 # Machine-readable report
-py -3 investment_tracker.py --format json --output latest_report.json
+py -3 -m nlb_invest --format json --output latest_report.json
 
 # Analyze every disclosed equity instead of the default 90% coverage target
-py -3 investment_tracker.py --coverage 100
+py -3 -m nlb_invest --coverage 100
 
 # Re-resolve Yahoo symbols after replacing the monthly PDF
-py -3 investment_tracker.py --refresh-symbols
+py -3 -m nlb_invest --refresh-symbols
 
 # Disable the live extension and align Yahoo with NLB's latest official date
-py -3 investment_tracker.py --official-close
+py -3 -m nlb_invest --official-close
 
 # Use a different starting date for the return/earnings section
-py -3 investment_tracker.py --return-since 2026-08-19
+py -3 -m nlb_invest --return-since 2026-08-19
 ```
 
 Run the tests with:
 
 ```powershell
-py -3 -m unittest -v
+py -3 -m unittest discover -s tests -v
 ```
 
 ## Keep it current
@@ -138,7 +138,7 @@ This is informational analysis, not investment advice.
 Install the optional interface dependencies once:
 
 ```powershell
-py -3 -m pip install -r requirements-dashboard.txt
+py -3 -m pip install -e ".[dashboard]"
 ```
 
 Double-click **Open dashboard.cmd**, or run `powershell -ExecutionPolicy Bypass -File run_dashboard.ps1`.
@@ -155,3 +155,22 @@ the ignored `local/` directory. Reopening the dashboard shows saved results;
 no network refresh occurs until you click Refresh. It can also display an existing
 `latest_report.json`; refresh once to add chart history. A failed refresh keeps
 the previous results visible. The original command-line reports remain separate.
+
+## Project structure
+
+- `src/nlb_invest/models.py`: shared models and fund configuration.
+- `nlb_client.py` and `yahoo_client.py`: official NAV and market data access.
+- `pdf_parser.py`: monthly holdings report extraction.
+- `analytics.py` and `currency.py`: returns, attribution and FX conversion.
+- `reporting.py` and `cli.py`: report formatting and command-line orchestration.
+- `http_client.py` and `utils.py`: shared transport and decimal parsing.
+- `dashboard/app.py`, `data.py`, `launch.py`: interface, local storage and browser launcher.
+- `tests/`: tests grouped by responsibility.
+- `pyproject.toml`: package metadata, dependencies and optional dashboard dependencies.
+
+Install in editable mode from the project root with `py -3 -m pip install -e .`,
+or `py -3 -m pip install -e ".[dashboard]"` for the browser interface.
+After installation, use `py -3 -m nlb_invest` for the CLI and
+`py -3 -m dashboard.launch` for the dashboard. The original
+`investment_tracker.py` remains a small compatibility entry point.
+The PowerShell launchers and **Open dashboard.cmd** still work.

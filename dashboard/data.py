@@ -1,16 +1,18 @@
-﻿"""Local dashboard storage and an adapter to the existing tracker."""
+"""Local dashboard storage and an adapter to the existing tracker."""
 from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from investment_tracker import (
-    FUNDS, NlbClient, YahooClient, analyze_fund, build_investment_summary,
-    extract_pdf_text, parse_holdings,
-)
+from nlb_invest.analytics import analyze_fund
+from nlb_invest.models import FUNDS
+from nlb_invest.nlb_client import NlbClient
+from nlb_invest.pdf_parser import extract_pdf_text, parse_holdings
+from nlb_invest.reporting import build_investment_summary
+from nlb_invest.yahoo_client import YahooClient
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 LOCAL = ROOT / "local"
 REPORT_PATH = LOCAL / "dashboard_report.json"
 SETTINGS_PATH = LOCAL / "dashboard_settings.json"

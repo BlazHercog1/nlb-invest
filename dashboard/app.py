@@ -1,14 +1,15 @@
-﻿"""Run with: py -3 -m streamlit run dashboard.py"""
+"""Run with: py -3 -m streamlit run dashboard/app.py"""
 from datetime import date
 
 import plotly.graph_objects as go
 import streamlit as st
 
-from dashboard_data import (
+from dashboard.data import (
     DEFAULT_DATE, LOCAL, ROOT, SETTINGS_PATH, load_report, load_settings,
     refresh_report, write_json,
 )
-from investment_tracker import FUNDS, fmt_eur, fmt_pct_value
+from nlb_invest.models import FUNDS
+from nlb_invest.reporting import fmt_eur, fmt_pct_value
 
 
 def performance_chart(funds):
@@ -162,5 +163,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

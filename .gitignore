@@ -31,3 +31,8 @@ private/
 .DS_Store
 Thumbs.db
 *.log
+
+# Python packaging artifacts
+*.egg-info/
+build/
+dist/
