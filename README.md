@@ -132,3 +132,26 @@ The live NAV estimate assumes the PDF weights remain fixed and that untracked as
 The return/earnings section assumes the invested amount was in the fund at the NLB NAV on the requested start date and stayed there continuously. It excludes entry or exit charges, taxes, and later deposits or withdrawals. If there is no NAV on the requested date, the latest preceding NLB NAV is used and its actual date is printed.
 
 This is informational analysis, not investment advice.
+
+## Simple browser dashboard
+
+Install the optional interface dependencies once:
+
+```powershell
+py -3 -m pip install -r requirements-dashboard.txt
+```
+
+Double-click **Open dashboard.cmd**, or run `powershell -ExecutionPolicy Bypass -File run_dashboard.ps1`.
+The dashboard runs locally at http://127.0.0.1:8501. Keep its launcher window open;
+close it to stop the dashboard.
+
+Enter investment amounts and their common start date, choose an NLB monthly PDF,
+and click **Refresh**. The dashboard shows fund returns, estimated investment
+values, official NAV performance charts and the disclosed holdings. It reuses
+the command-line tracker's calculations. A refresh can take a few minutes.
+
+Settings, uploaded PDFs and the last successful dashboard report are stored in
+the ignored `local/` directory. Reopening the dashboard shows saved results;
+no network refresh occurs until you click Refresh. It can also display an existing
+`latest_report.json`; refresh once to add chart history. A failed refresh keeps
+the previous results visible. The original command-line reports remain separate.
