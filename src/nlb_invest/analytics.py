@@ -1,6 +1,7 @@
 """Calculate fund performance, holding contributions and live NAV estimates."""
 from __future__ import annotations
 
+import calendar
 import concurrent.futures
 import math
 import statistics
@@ -12,6 +13,91 @@ from .models import FundConfig, Holding, HoldingResult, MarketPoint, NavPoint
 
 if TYPE_CHECKING:
     from .yahoo_client import YahooClient
+
+
+def add_months(value: date, months: int = 1) -> date:
+    """Move a date by whole calendar months, clamping to the month's last day."""
+    month_index = value.year * 12 + value.month - 1 + months
+    year, month_zero_based = divmod(month_index, 12)
+    month = month_zero_based + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def calculate_contribution_plan(
+    points: list[NavPoint],
+    estimated_live_nav: float,
+    initial_amount_eur: float,
+    initial_date: date,
+    monthly_amount_eur: float = 0.0,
+    monthly_start_date: date | None = None,
+) -> dict[str, Any]:
+    """Estimate units bought by one initial payment and fixed monthly payments."""
+    if initial_amount_eur < 1000:
+        raise ValueError("The initial investment must be at least EUR 1,000.")
+    if monthly_amount_eur and not 40 <= monthly_amount_eur <= 400:
+        raise ValueError("The monthly contribution must be EUR 40 to EUR 400, or zero.")
+    if monthly_amount_eur and monthly_start_date is None:
+        raise ValueError("Choose the first monthly contribution date.")
+    if monthly_amount_eur and monthly_start_date <= initial_date:
+        raise ValueError("The first monthly contribution must be after the initial investment date.")
+    if not points:
+        raise RuntimeError("No NLB NAV history is available for the investment plan.")
+
+    official_points = sorted(points, key=lambda point: point.day)
+    latest = official_points[-1]
+
+    def purchase(scheduled_date: date, amount: float, kind: str) -> dict[str, Any] | None:
+        nav_point = next((point for point in official_points if point.day >= scheduled_date), None)
+        if nav_point is None:
+            return None
+        units = amount / nav_point.nav
+        return {
+            "type": kind,
+            "scheduled_date": scheduled_date.isoformat(),
+            "nav_date_used": nav_point.day.isoformat(),
+            "amount_eur": amount,
+            "nav_eur": nav_point.nav,
+            "units": units,
+        }
+
+    initial = purchase(initial_date, initial_amount_eur, "initial")
+    if initial is None:
+        raise RuntimeError(
+            f"No published NLB NAV is available on or after the initial investment date {initial_date}."
+        )
+    contributions = [initial]
+    if monthly_amount_eur and monthly_start_date is not None:
+        scheduled = monthly_start_date
+        month_number = 0
+        while scheduled <= latest.day:
+            contribution = purchase(scheduled, monthly_amount_eur, "monthly")
+            if contribution is not None:
+                contributions.append(contribution)
+            month_number += 1
+            scheduled = add_months(monthly_start_date, month_number)
+
+    total_contributed = sum(item["amount_eur"] for item in contributions)
+    accumulated_units = sum(item["units"] for item in contributions)
+    official_value = accumulated_units * latest.nav
+    estimated_value = accumulated_units * estimated_live_nav
+    gain = estimated_value - total_contributed
+    return {
+        "initial_amount_eur": initial_amount_eur,
+        "initial_date": initial_date.isoformat(),
+        "initial_nav_date_used": initial["nav_date_used"],
+        "monthly_amount_eur": monthly_amount_eur,
+        "monthly_start_date": monthly_start_date.isoformat() if monthly_start_date else None,
+        "contribution_count": len(contributions),
+        "monthly_contribution_count": len(contributions) - 1,
+        "total_contributed_eur": total_contributed,
+        "accumulated_units": accumulated_units,
+        "official_value_eur": official_value,
+        "estimated_current_value_eur": estimated_value,
+        "estimated_gain_eur": gain,
+        "estimated_return_pct": gain / total_contributed * 100.0,
+        "contributions": contributions,
+    }
 
 
 def select_window(points: list[MarketPoint], start: date, end: date) -> list[MarketPoint]:

@@ -40,11 +40,16 @@ def build_investment_summary(funds: list[dict[str, Any]]) -> dict[str, Any] | No
 
 def render_investment_summary(report: dict[str, Any]) -> list[str]:
     summary = report["investment_summary"]
+    contribution_plans = any(fund.get("investment_plan") for fund in report["funds"])
     lines = [
         "",
         "MY INVESTMENTS",
         "--------------",
-        f"Based on money invested since: {report['return_since']}",
+        *(
+            ["Includes each initial investment and the scheduled monthly contributions shown below."]
+            if contribution_plans
+            else [f"Based on money invested since: {report['return_since']}"]
+        ),
         f"Total invested:                {fmt_eur(summary['total_invested_eur'])}",
         f"Estimated current value:       {fmt_eur(summary['estimated_current_value_eur'])}",
         f"Estimated gain / loss:         {fmt_eur(summary['estimated_gain_eur'])}",
@@ -55,11 +60,11 @@ def render_investment_summary(report: dict[str, Any]) -> list[str]:
     for fund in report["funds"]:
         if fund["invested_eur"] is None:
             continue
-        since = fund["return_since_date"]
+        gain = fund["current_value_eur"] - fund["invested_eur"]
         lines.append(
             f"{fund_display_name(fund['key']):<29} {fmt_eur(fund['invested_eur']):>14} "
             f"{fmt_eur(fund['current_value_eur']):>14} "
-            f"{fmt_eur(since['estimated_gain_for_investment_eur']):>14}"
+            f"{fmt_eur(gain):>14}"
         )
     return lines
 
@@ -112,9 +117,30 @@ def render_text(report: dict[str, Any]) -> str:
         )
         if fund["invested_eur"] is not None:
             value_label = "Estimated live value" if live else "Value at official NAV"
+            investment_label = (
+                "total contributions" if fund.get("investment_plan") else "investment"
+            )
             lines.append(
-                f"{value_label} of your {fmt_eur(fund['invested_eur'])} investment: "
+                f"{value_label} of your {fmt_eur(fund['invested_eur'])} {investment_label}: "
                 f"{fmt_eur(fund['current_value_eur'])}"
+            )
+        plan = fund.get("investment_plan")
+        if plan:
+            monthly = (
+                f"{fmt_eur(plan['monthly_amount_eur'])} from {plan['monthly_start_date']}"
+                if plan["monthly_amount_eur"]
+                else "none"
+            )
+            lines.extend(
+                [
+                    f"Initial investment: {fmt_eur(plan['initial_amount_eur'])} on {plan['initial_date']} "
+                    f"(NAV date used: {plan['initial_nav_date_used']})",
+                    f"Monthly contribution: {monthly}",
+                    f"Contributions included: {plan['contribution_count']} | "
+                    f"accumulated units: {plan['accumulated_units']:.6f}",
+                    f"Estimated investment gain / loss: {fmt_eur(plan['estimated_gain_eur'])} "
+                    f"({fmt_pct_value(plan['estimated_return_pct'])})",
+                ]
             )
         since = fund["return_since_date"]
         end_label = "Estimated live" if live else "Official close"

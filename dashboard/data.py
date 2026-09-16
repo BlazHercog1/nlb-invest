@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from nlb_invest.analytics import analyze_fund
+from nlb_invest.analytics import analyze_fund, calculate_contribution_plan
 from nlb_invest.models import FUNDS
 from nlb_invest.nlb_client import NlbClient
 from nlb_invest.pdf_parser import extract_pdf_text, parse_holdings
@@ -62,6 +62,7 @@ def refresh_report(
     since: date,
     amounts: dict,
     live: bool = True,
+    investment_plans: dict | None = None,
     *,
     on_progress: Callable[[float, str], None] | None = None,
 ):
@@ -77,6 +78,18 @@ def refresh_report(
         raise ValueError("The investment start date cannot be in the future.")
     if any(value < 0 for value in amounts.values()):
         raise ValueError("Invested amounts cannot be negative.")
+    plans = investment_plans or {}
+    for key, plan in plans.items():
+        initial_amount = float(plan.get("initial_amount_eur") or 0.0)
+        monthly_amount = float(plan.get("monthly_amount_eur") or 0.0)
+        if initial_amount == 0 and monthly_amount == 0:
+            continue
+        if initial_amount < 1000:
+            raise ValueError(f"{FUNDS[key].title}: initial investment must be at least EUR 1,000.")
+        if monthly_amount and not 40 <= monthly_amount <= 400:
+            raise ValueError(f"{FUNDS[key].title}: monthly contribution must be EUR 40 to EUR 400, or zero.")
+        if monthly_amount and plan["monthly_start_date"] <= plan["initial_date"]:
+            raise ValueError(f"{FUNDS[key].title}: first monthly contribution must be after the initial investment date.")
     notify(0, "Reading the monthly PDF...")
     text = extract_pdf_text(pdf)
     notify(1, "Parsing the disclosed fund holdings...")
@@ -85,7 +98,13 @@ def refresh_report(
     reports = []
     for index, (key, fund) in enumerate(FUNDS.items()):
         holdings_date, holdings = parsed[key]
-        start = min(today - timedelta(days=400), holdings_date - timedelta(days=7), since - timedelta(days=7))
+        plan = plans.get(key)
+        plan_active = bool(plan and (plan.get("initial_amount_eur") or plan.get("monthly_amount_eur")))
+        analysis_start = plan["initial_date"] if plan_active else since
+        start = min(
+            today - timedelta(days=400), holdings_date - timedelta(days=7),
+            analysis_start - timedelta(days=7),
+        )
         stage = 2 + 2 * index
         label = f"Fund {index + 1}/{len(FUNDS)}: {fund.title}"
         notify(stage, f"{label}: fetching official NLB values...")
@@ -93,9 +112,21 @@ def refresh_report(
         notify(stage + 1, f"{label}: fetching holding prices and FX rates...")
         result = analyze_fund(
             fund, holdings_date, holdings, nav, yahoo, today, 90.0, 6,
-            amounts.get(key, 0.0), live, since,
+            None if plan_active else (amounts.get(key) or None), live, analysis_start,
         )
         official_date = date.fromisoformat(result["metrics"]["latest_date"])
+        if plan_active:
+            investment = calculate_contribution_plan(
+                [point for point in nav if point.day <= official_date],
+                result["estimated_live_nav_eur"],
+                float(plan["initial_amount_eur"]),
+                plan["initial_date"],
+                float(plan.get("monthly_amount_eur") or 0.0),
+                plan.get("monthly_start_date"),
+            )
+            result["investment_plan"] = investment
+            result["invested_eur"] = investment["total_contributed_eur"]
+            result["current_value_eur"] = investment["estimated_current_value_eur"]
         result["nav_history"] = [
             {"date": point.day.isoformat(), "nav": point.nav}
             for point in nav if point.day <= official_date
@@ -108,6 +139,14 @@ def refresh_report(
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "as_of": today.isoformat(), "source_pdf": pdf.name,
         "return_since": since.isoformat(), "market_mode": "live" if live else "official-close",
+        "investment_mode": (
+            "contribution-plan"
+            if any(
+                plan.get("initial_amount_eur") or plan.get("monthly_amount_eur")
+                for plan in plans.values()
+            )
+            else "lump-sum"
+        ),
         "coverage_target_pct": 90.0,
         "investment_summary": build_investment_summary(reports), "funds": reports,
     }

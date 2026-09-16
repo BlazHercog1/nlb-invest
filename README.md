@@ -43,9 +43,9 @@ Live estimation is the default. The report includes Yahoo's earliest and latest 
 
 Each fund also has a dedicated return/earnings section starting on **2026-08-19**. It shows the official NLB return, the estimated live return, and the estimated gain per EUR 1,000. When `--invested-tech`, `--invested-balanced`, or `--invested-developed` is supplied, it also estimates the current value and gain/loss for that invested amount.
 
-## My Investments
+## My Investments (command line)
 
-The personal tracking is intentionally simple: enter how much money you invested in each fund. You do not need to track units, transactions, fees, XIRR, allocation targets, or rebalancing.
+The command-line personal tracking is intentionally simple: enter a single amount invested in each fund. The browser dashboard additionally supports the basic initial-plus-monthly contribution plan described below.
 
 The tracker treats those amounts as invested from the `--return-since` date. By default that date is `2026-08-19`; change it if your invested amount should be measured from another day.
 
@@ -145,10 +145,14 @@ Double-click **Open dashboard.cmd**, or run `powershell -ExecutionPolicy Bypass 
 The dashboard runs locally at http://127.0.0.1:8501. Keep its launcher window open;
 close it to stop the dashboard.
 
-Enter investment amounts and their common start date, choose an NLB monthly PDF,
-and click **Refresh**. The dashboard shows fund returns, estimated investment
-values, official NAV performance charts and the disclosed holdings. It reuses
-the command-line tracker's calculations. A refresh can take a few minutes.
+For each fund, enter an initial investment of at least EUR 1,000 and, optionally,
+a fixed monthly contribution from EUR 40 to EUR 400. Choose the initial and first
+monthly contribution dates, select an NLB monthly PDF, and click **Refresh**.
+Each scheduled payment buys estimated units using the first published NLB NAV on
+or after its date. The dashboard shows total contributions, estimated investment
+values, official NAV performance charts and the disclosed holdings. This basic
+plan assumes the same monthly amount with no skipped or extra payments, fees, or
+withdrawals. A refresh can take a few minutes.
 The progress bar shows PDF parsing, NLB values and holding prices for each fund,
 then saving. It advances by completed stages rather than elapsed time.
 

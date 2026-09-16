@@ -8,8 +8,16 @@ from dashboard.data import (
     DEFAULT_DATE, LOCAL, ROOT, SETTINGS_PATH, load_report, load_settings,
     refresh_report, report_exports, write_json,
 )
+from nlb_invest.analytics import add_months
 from nlb_invest.models import FUNDS
 from nlb_invest.reporting import fmt_eur, fmt_pct_value
+
+
+def saved_date(value, fallback):
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def performance_chart(funds):
@@ -44,20 +52,57 @@ def main():
 
     with st.sidebar:
         st.header("My investments")
-        st.caption("Each amount is treated as invested on the start date.")
+        st.caption(
+            "For each fund, enter an initial investment of EUR 1,000 or more. "
+            "A monthly contribution is optional and must be EUR 40 to EUR 400."
+        )
         with st.form("investment_settings"):
-            try:
-                initial_date = date.fromisoformat(settings.get("return_since", DEFAULT_DATE.isoformat()))
-            except (TypeError, ValueError):
-                initial_date = DEFAULT_DATE
-            since = st.date_input("Investment start date", value=min(initial_date, date.today()), max_value=date.today())
-            amounts = {
-                key: st.number_input(
-                    fund.title + " (EUR)", min_value=0.0,
-                    value=float(settings.get("amounts", {}).get(key, 0.0)),
-                    step=100.0, format="%.2f", key="amount_" + key,
-                ) for key, fund in FUNDS.items()
-            }
+            legacy_date = saved_date(settings.get("return_since"), DEFAULT_DATE)
+            saved_plans = settings.get("plans", {})
+            plans = {}
+            for key, fund in FUNDS.items():
+                saved_plan = saved_plans.get(key, {})
+                default_initial_date = saved_date(saved_plan.get("initial_date"), legacy_date)
+                default_monthly_start = saved_date(
+                    saved_plan.get("monthly_start_date"), add_months(default_initial_date),
+                )
+                with st.expander(fund.title, expanded=bool(
+                    saved_plan.get("initial_amount_eur")
+                    or settings.get("amounts", {}).get(key, 0.0)
+                )):
+                    initial_amount = st.number_input(
+                        "Initial investment (EUR; 0 or at least 1,000)", min_value=0.0,
+                        value=float(saved_plan.get(
+                            "initial_amount_eur", settings.get("amounts", {}).get(key, 0.0),
+                        )),
+                        step=100.0, format="%.2f", key="amount_" + key,
+                    )
+                    initial_date = st.date_input(
+                        "Initial investment date", value=min(default_initial_date, date.today()),
+                        max_value=date.today(), key="initial_date_" + key,
+                    )
+                    monthly_amount = st.number_input(
+                        "Monthly contribution (EUR; 0 or 40-400)", min_value=0.0,
+                        max_value=400.0, value=float(saved_plan.get("monthly_amount_eur", 0.0)),
+                        step=10.0, format="%.2f", key="monthly_amount_" + key,
+                    )
+                    monthly_start = st.date_input(
+                        "First monthly contribution date", value=default_monthly_start,
+                        key="monthly_start_" + key,
+                    )
+                    st.caption("Enter 0 for the monthly contribution to disable it.")
+                plans[key] = {
+                    "initial_amount_eur": initial_amount,
+                    "initial_date": initial_date,
+                    "monthly_amount_eur": monthly_amount,
+                    "monthly_start_date": monthly_start,
+                }
+            amounts = {key: plan["initial_amount_eur"] for key, plan in plans.items()}
+            active_dates = [
+                plan["initial_date"] for plan in plans.values()
+                if plan["initial_amount_eur"] or plan["monthly_amount_eur"]
+            ]
+            since = min(active_dates, default=min(legacy_date, date.today()))
             pdfs = sorted([*ROOT.glob("*.pdf"), *LOCAL.glob("*.pdf")])
             chosen = st.selectbox(
                 "Monthly holdings report", pdfs, format_func=lambda p: p.name,
@@ -82,13 +127,21 @@ def main():
                 refresh_progress = st.progress(0.0, text="Starting refresh...")
                 with st.spinner("Refreshing your funds. This may take a few minutes..."):
                     report = refresh_report(
-                        pdf, since, amounts, live,
+                        pdf, since, amounts, live, plans,
                         on_progress=lambda value, message: refresh_progress.progress(
                             value * 0.95, text=message,
                         ),
                     )
                 write_json(SETTINGS_PATH, {
                     "return_since": since.isoformat(), "amounts": amounts,
+                    "plans": {
+                        key: {
+                            **plan,
+                            "initial_date": plan["initial_date"].isoformat(),
+                            "monthly_start_date": plan["monthly_start_date"].isoformat(),
+                        }
+                        for key, plan in plans.items()
+                    },
                     "pdf": pdf.name, "live": live,
                 })
                 st.session_state.report = report
@@ -105,10 +158,7 @@ def main():
         st.info("Enter your invested amounts, choose a monthly report, and click Refresh to get started.")
         return
 
-    st.caption(
-        f"Last refreshed: {report['generated_at']} · Investment start: {report['return_since']} · "
-        f"Report: {report['source_pdf']}"
-    )
+    st.caption(f"Last refreshed: {report['generated_at']} · Report: {report['source_pdf']}")
     if date.fromisoformat(report["as_of"]) < date.today():
         st.info("These are saved results from an earlier day. Click Refresh for the latest available data.")
     st.caption("Results and downloads use the settings from the last successful refresh.")
@@ -131,8 +181,12 @@ def main():
         st.warning(f"{unavailable} holdings have unavailable prices. Estimates use the successfully tracked holdings; see their status below.")
     summary = report.get("investment_summary")
     if summary and summary["total_invested_eur"] > 0:
+        has_plans = any(fund.get("investment_plan") for fund in report["funds"])
         cols = st.columns(3)
-        cols[0].metric("Invested", fmt_eur(summary["total_invested_eur"]))
+        cols[0].metric(
+            "Total contributed" if has_plans else "Invested",
+            fmt_eur(summary["total_invested_eur"]),
+        )
         cols[1].metric("Estimated value", fmt_eur(summary["estimated_current_value_eur"]))
         cols[2].metric(
             "Estimated gain / loss", fmt_eur(summary["estimated_gain_eur"]),
@@ -143,10 +197,30 @@ def main():
         with column:
             st.subheader(FUNDS[fund["key"]].title)
             analysis = fund["return_since_date"]
-            st.metric("Official return", fmt_pct_value(analysis["official_return_pct"]))
-            st.metric("Estimated return", fmt_pct_value(analysis["estimated_live_return_pct"]))
-            if (fund.get("invested_eur") or 0) > 0:
-                st.metric("Estimated value", fmt_eur(fund["current_value_eur"]))
+            plan = fund.get("investment_plan")
+            if plan:
+                st.metric("Total contributed", fmt_eur(plan["total_contributed_eur"]))
+                st.metric("Estimated value", fmt_eur(plan["estimated_current_value_eur"]))
+                st.metric(
+                    "Estimated gain / loss", fmt_eur(plan["estimated_gain_eur"]),
+                    fmt_pct_value(plan["estimated_return_pct"]),
+                )
+                monthly_text = (
+                    f"EUR {plan['monthly_amount_eur']:,.2f}/month from {plan['monthly_start_date']}"
+                    if plan["monthly_amount_eur"]
+                    else "no monthly contribution"
+                )
+                st.caption(
+                    f"Initial: EUR {plan['initial_amount_eur']:,.2f} on {plan['initial_date']}  \n"
+                    f"Then: {monthly_text}  \n"
+                    f"Contributions included: {plan['contribution_count']} · "
+                    f"Total paid: {fmt_eur(plan['total_contributed_eur'])}"
+                )
+            else:
+                st.metric("Official return", fmt_pct_value(analysis["official_return_pct"]))
+                st.metric("Estimated return", fmt_pct_value(analysis["estimated_live_return_pct"]))
+                if (fund.get("invested_eur") or 0) > 0:
+                    st.metric("Estimated value", fmt_eur(fund["current_value_eur"]))
             st.caption(
                 f"Official NAV: {fmt_eur(fund['metrics']['latest_nav_eur'])} · "
                 f"{fund['metrics']['latest_date']}\n\n"

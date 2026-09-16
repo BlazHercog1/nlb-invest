@@ -13,6 +13,36 @@ from nlb_invest.reporting import render_text
 
 
 class DashboardDataTests(unittest.TestCase):
+    def test_refresh_applies_initial_and_monthly_contributions_separately(self):
+        nav = [
+            NavPoint(date(2026, 7, 20), 10, None, {}),
+            NavPoint(date(2026, 8, 20), 20, None, {}),
+        ]
+        plans = {
+            "tech": {
+                "initial_amount_eur": 1000,
+                "initial_date": date(2026, 7, 20),
+                "monthly_amount_eur": 100,
+                "monthly_start_date": date(2026, 8, 20),
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            report_path = Path(directory) / "report.json"
+            with patch.object(data, "REPORT_PATH", report_path), patch.object(data, "extract_pdf_text", return_value="pdf"), patch.object(data, "parse_holdings", return_value=(date(2026, 7, 31), [])), patch.object(data, "NlbClient") as nlb, patch.object(data, "YahooClient"):
+                nlb.return_value.get_nav_history.return_value = nav
+                report = data.refresh_report(
+                    Path("report.pdf"), date(2026, 7, 20),
+                    {key: 0 for key in FUNDS}, True, plans,
+                )
+
+        tech = next(fund for fund in report["funds"] if fund["key"] == "tech")
+        self.assertEqual(tech["investment_plan"]["contribution_count"], 2)
+        self.assertAlmostEqual(tech["invested_eur"], 1100)
+        self.assertAlmostEqual(tech["investment_plan"]["accumulated_units"], 105)
+        self.assertAlmostEqual(tech["current_value_eur"], 2100)
+        self.assertAlmostEqual(report["investment_summary"]["estimated_gain_eur"], 1000)
+        self.assertIn("Monthly contribution: EUR 100.00", render_text(report))
+
     def test_refresh_matches_tracker_and_keeps_official_history(self):
         nav = [
             NavPoint(date(2026, 8, 18), 100, None, {}),
