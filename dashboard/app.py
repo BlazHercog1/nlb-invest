@@ -6,7 +6,7 @@ import streamlit as st
 
 from dashboard.data import (
     DEFAULT_DATE, LOCAL, ROOT, SETTINGS_PATH, load_report, load_settings,
-    refresh_report, write_json,
+    refresh_report, report_exports, write_json,
 )
 from nlb_invest.models import FUNDS
 from nlb_invest.reporting import fmt_eur, fmt_pct_value
@@ -70,6 +70,7 @@ def main():
 
     if submitted:
         pdf = chosen
+        refresh_progress = None
         try:
             if uploaded is not None:
                 LOCAL.mkdir(parents=True, exist_ok=True)
@@ -78,15 +79,24 @@ def main():
             if pdf is None:
                 st.error("Choose or upload an NLB monthly report first.")
             else:
-                with st.spinner("Updating NLB values and holding prices. This may take a few minutes…"):
-                    report = refresh_report(pdf, since, amounts, live)
+                refresh_progress = st.progress(0.0, text="Starting refresh...")
+                with st.spinner("Refreshing your funds. This may take a few minutes..."):
+                    report = refresh_report(
+                        pdf, since, amounts, live,
+                        on_progress=lambda value, message: refresh_progress.progress(
+                            value * 0.95, text=message,
+                        ),
+                    )
                 write_json(SETTINGS_PATH, {
                     "return_since": since.isoformat(), "amounts": amounts,
                     "pdf": pdf.name, "live": live,
                 })
                 st.session_state.report = report
+                refresh_progress.progress(1.0, text="Refresh complete.")
                 st.success("Updated.")
         except Exception as exc:
+            if refresh_progress is not None:
+                refresh_progress.empty()
             st.error(f"Could not refresh: {exc}")
             st.info("Your previous report is still shown below. Check the PDF and your internet connection, then retry.")
 
@@ -101,7 +111,21 @@ def main():
     )
     if date.fromisoformat(report["as_of"]) < date.today():
         st.info("These are saved results from an earlier day. Click Refresh for the latest available data.")
-    st.caption("Results below use the settings from the last successful refresh.")
+    st.caption("Results and downloads use the settings from the last successful refresh.")
+    text_export, json_export = report_exports(report)
+    export_columns = st.columns(2)
+    with export_columns[0]:
+        st.download_button(
+            "Download text report", data=text_export,
+            file_name="latest_report.txt", mime="text/plain",
+            on_click="ignore", width="stretch",
+        )
+    with export_columns[1]:
+        st.download_button(
+            "Download JSON report", data=json_export,
+            file_name="latest_report.json", mime="application/json",
+            on_click="ignore", width="stretch",
+        )
     unavailable = sum(bool(h["error"]) for f in report["funds"] for h in f["holdings"])
     if unavailable:
         st.warning(f"{unavailable} holdings have unavailable prices. Estimates use the successfully tracked holdings; see their status below.")

@@ -149,6 +149,14 @@ Enter investment amounts and their common start date, choose an NLB monthly PDF,
 and click **Refresh**. The dashboard shows fund returns, estimated investment
 values, official NAV performance charts and the disclosed holdings. It reuses
 the command-line tracker's calculations. A refresh can take a few minutes.
+The progress bar shows PDF parsing, NLB values and holding prices for each fund,
+then saving. It advances by completed stages rather than elapsed time.
+
+Use **Download text report** or **Download JSON report** to export the last
+successful report shown on screen. Downloads do not fetch new prices. The text
+export uses the CLI report format; JSON also includes the chart history.
+Files are downloaded through your browser as `latest_report.txt` and
+`latest_report.json`.
 
 Settings, uploaded PDFs and the last successful dashboard report are stored in
 the ignored `local/` directory. Reopening the dashboard shows saved results;
