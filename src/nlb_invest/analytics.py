@@ -31,6 +31,7 @@ def calculate_contribution_plan(
     initial_date: date,
     monthly_amount_eur: float = 0.0,
     monthly_start_date: date | None = None,
+    monthly_changes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Estimate units bought by one initial payment and fixed monthly payments."""
     if initial_amount_eur < 1000:
@@ -41,6 +42,18 @@ def calculate_contribution_plan(
         raise ValueError("Choose the first monthly contribution date.")
     if monthly_amount_eur and monthly_start_date <= initial_date:
         raise ValueError("The first monthly contribution must be after the initial investment date.")
+    normalized_changes = sorted(
+        monthly_changes or [], key=lambda change: change["effective_date"]
+    )
+    for change in normalized_changes:
+        amount = float(change["amount_eur"])
+        effective_date = change["effective_date"]
+        if not monthly_amount_eur:
+            raise ValueError("A monthly amount change requires an existing monthly contribution.")
+        if not 40 <= amount <= 400:
+            raise ValueError("A changed monthly contribution must be EUR 40 to EUR 400.")
+        if effective_date <= monthly_start_date:
+            raise ValueError("A monthly amount change must take effect after the first monthly contribution.")
     if not points:
         raise RuntimeError("No NLB NAV history is available for the investment plan.")
 
@@ -71,7 +84,11 @@ def calculate_contribution_plan(
         scheduled = monthly_start_date
         month_number = 0
         while scheduled <= latest.day:
-            contribution = purchase(scheduled, monthly_amount_eur, "monthly")
+            scheduled_amount = monthly_amount_eur
+            for change in normalized_changes:
+                if change["effective_date"] <= scheduled:
+                    scheduled_amount = float(change["amount_eur"])
+            contribution = purchase(scheduled, scheduled_amount, "monthly")
             if contribution is not None:
                 contributions.append(contribution)
             month_number += 1
@@ -82,12 +99,36 @@ def calculate_contribution_plan(
     official_value = accumulated_units * latest.nav
     estimated_value = accumulated_units * estimated_live_nav
     gain = estimated_value - total_contributed
+    value_history = []
+    for nav_point in official_points:
+        purchased = [
+            item for item in contributions
+            if date.fromisoformat(item["nav_date_used"]) <= nav_point.day
+        ]
+        if not purchased:
+            continue
+        contributed = sum(item["amount_eur"] for item in purchased)
+        units = sum(item["units"] for item in purchased)
+        value = units * nav_point.nav
+        value_history.append({
+            "date": nav_point.day.isoformat(),
+            "contributed_eur": contributed,
+            "value_eur": value,
+            "gain_eur": value - contributed,
+        })
     return {
         "initial_amount_eur": initial_amount_eur,
         "initial_date": initial_date.isoformat(),
         "initial_nav_date_used": initial["nav_date_used"],
         "monthly_amount_eur": monthly_amount_eur,
         "monthly_start_date": monthly_start_date.isoformat() if monthly_start_date else None,
+        "monthly_changes": [
+            {
+                "effective_date": change["effective_date"].isoformat(),
+                "amount_eur": float(change["amount_eur"]),
+            }
+            for change in normalized_changes
+        ],
         "contribution_count": len(contributions),
         "monthly_contribution_count": len(contributions) - 1,
         "total_contributed_eur": total_contributed,
@@ -97,6 +138,7 @@ def calculate_contribution_plan(
         "estimated_gain_eur": gain,
         "estimated_return_pct": gain / total_contributed * 100.0,
         "contributions": contributions,
+        "value_history": value_history,
     }
 
 

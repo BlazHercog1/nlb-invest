@@ -90,6 +90,14 @@ def refresh_report(
             raise ValueError(f"{FUNDS[key].title}: monthly contribution must be EUR 40 to EUR 400, or zero.")
         if monthly_amount and plan["monthly_start_date"] <= plan["initial_date"]:
             raise ValueError(f"{FUNDS[key].title}: first monthly contribution must be after the initial investment date.")
+        for change in plan.get("monthly_changes", []):
+            changed_amount = float(change.get("amount_eur") or 0.0)
+            if not monthly_amount:
+                raise ValueError(f"{FUNDS[key].title}: set a monthly contribution before adding an amount change.")
+            if not 40 <= changed_amount <= 400:
+                raise ValueError(f"{FUNDS[key].title}: changed monthly contribution must be EUR 40 to EUR 400.")
+            if change["effective_date"] <= plan["monthly_start_date"]:
+                raise ValueError(f"{FUNDS[key].title}: monthly amount change must be after the first monthly contribution.")
     notify(0, "Reading the monthly PDF...")
     text = extract_pdf_text(pdf)
     notify(1, "Parsing the disclosed fund holdings...")
@@ -123,6 +131,7 @@ def refresh_report(
                 plan["initial_date"],
                 float(plan.get("monthly_amount_eur") or 0.0),
                 plan.get("monthly_start_date"),
+                plan.get("monthly_changes"),
             )
             result["investment_plan"] = investment
             result["invested_eur"] = investment["total_contributed_eur"]

@@ -146,13 +146,15 @@ The dashboard runs locally at http://127.0.0.1:8501. Keep its launcher window op
 close it to stop the dashboard.
 
 For each fund, enter an initial investment of at least EUR 1,000 and, optionally,
-a fixed monthly contribution from EUR 40 to EUR 400. Choose the initial and first
-monthly contribution dates, select an NLB monthly PDF, and click **Refresh**.
+a monthly contribution from EUR 40 to EUR 400. Choose the initial and first
+monthly contribution dates and, if applicable, one later monthly-amount change.
+Then select an NLB monthly PDF and click **Refresh**.
 Each scheduled payment buys estimated units using the first published NLB NAV on
 or after its date. The dashboard shows total contributions, estimated investment
-values, official NAV performance charts and the disclosed holdings. This basic
-plan assumes the same monthly amount with no skipped or extra payments, fees, or
-withdrawals. A refresh can take a few minutes.
+values, a contribution-versus-value chart, the generated transaction history,
+official NAV performance charts and the disclosed holdings. This basic plan does
+not support skipped or extra payments, fees, or withdrawals. A refresh can take
+a few minutes.
 The progress bar shows PDF parsing, NLB values and holding prices for each fund,
 then saving. It advances by completed stages rather than elapsed time.
 

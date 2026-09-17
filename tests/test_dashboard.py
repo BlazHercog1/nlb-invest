@@ -100,6 +100,50 @@ class DashboardDataTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("streamlit") and importlib.util.find_spec("plotly"), "Optional dashboard dependencies are not installed")
 class DashboardInterfaceTests(unittest.TestCase):
+    def test_contribution_plan_shows_chart_and_transaction_history(self):
+        from streamlit.testing.v1 import AppTest
+
+        nav = [
+            NavPoint(date(2026, 7, 20), 10, None, {}),
+            NavPoint(date(2026, 8, 20), 20, None, {}),
+        ]
+        plan = {
+            "initial_amount_eur": 1000,
+            "initial_date": date(2026, 7, 20),
+            "monthly_amount_eur": 100,
+            "monthly_start_date": date(2026, 8, 20),
+            "monthly_changes": [],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            local = Path(directory)
+            with patch.object(data, "REPORT_PATH", local / "report.json"), patch.object(data, "extract_pdf_text", return_value="pdf"), patch.object(data, "parse_holdings", return_value=(date(2026, 7, 31), [])), patch.object(data, "NlbClient") as nlb, patch.object(data, "YahooClient"):
+                nlb.return_value.get_nav_history.return_value = nav
+                report = data.refresh_report(
+                    Path("report.pdf"), date(2026, 7, 20),
+                    {key: 0 for key in FUNDS}, True, {"tech": plan},
+                )
+            settings = {
+                "return_since": "2026-07-20",
+                "amounts": {"tech": 1000},
+                "plans": {"tech": {
+                    **plan,
+                    "initial_date": "2026-07-20",
+                    "monthly_start_date": "2026-08-20",
+                }},
+            }
+            (local / "report.pdf").write_bytes(b"test")
+            with patch.object(data, "ROOT", local), patch.object(data, "LOCAL", local), patch.object(data, "SETTINGS_PATH", local / "settings.json"), patch.object(data, "load_report", return_value=report), patch.object(data, "load_settings", return_value=settings):
+                app = AppTest.from_file(
+                    str(Path(__file__).resolve().parents[1] / "dashboard" / "app.py"),
+                    default_timeout=30,
+                ).run()
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(len(app.get("plotly_chart")), 2)
+        self.assertEqual(len(app.dataframe), 2)
+        self.assertEqual(app.dataframe[0].value.iloc[0]["Type"], "Initial")
+        self.assertEqual(app.dataframe[0].value.iloc[1]["Amount (EUR)"], 100)
+
     def test_inputs_require_refresh_and_failed_refresh_keeps_results(self):
         import streamlit as st
         from streamlit.testing.v1 import AppTest

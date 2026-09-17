@@ -42,6 +42,30 @@ def performance_chart(funds):
     return figure
 
 
+def contribution_chart(plan):
+    history = plan.get("value_history", [])
+    figure = go.Figure()
+    if history:
+        figure.add_trace(go.Scatter(
+            x=[point["date"] for point in history],
+            y=[point["contributed_eur"] for point in history],
+            name="Total contributed", mode="lines", line_shape="hv",
+            hovertemplate="%{x}<br>EUR %{y:,.2f}<extra>%{fullData.name}</extra>",
+        ))
+        figure.add_trace(go.Scatter(
+            x=[point["date"] for point in history],
+            y=[point["value_eur"] for point in history],
+            name="Value at official NAV", mode="lines",
+            hovertemplate="%{x}<br>EUR %{y:,.2f}<extra>%{fullData.name}</extra>",
+        ))
+    figure.update_layout(
+        yaxis_title="EUR", xaxis_title=None,
+        legend=dict(orientation="h", y=-0.25), margin=dict(l=10, r=10, t=10, b=10),
+        height=370,
+    )
+    return figure
+
+
 def main():
     st.set_page_config(page_title="My NLB investments", page_icon="📈", layout="wide")
     st.title("My NLB investments")
@@ -65,6 +89,11 @@ def main():
                 default_initial_date = saved_date(saved_plan.get("initial_date"), legacy_date)
                 default_monthly_start = saved_date(
                     saved_plan.get("monthly_start_date"), add_months(default_initial_date),
+                )
+                saved_changes = saved_plan.get("monthly_changes") or []
+                saved_change = saved_changes[0] if saved_changes else {}
+                default_change_date = saved_date(
+                    saved_change.get("effective_date"), add_months(default_monthly_start),
                 )
                 with st.expander(fund.title, expanded=bool(
                     saved_plan.get("initial_amount_eur")
@@ -90,12 +119,28 @@ def main():
                         "First monthly contribution date", value=default_monthly_start,
                         key="monthly_start_" + key,
                     )
-                    st.caption("Enter 0 for the monthly contribution to disable it.")
+                    changed_monthly_amount = st.number_input(
+                        "Changed monthly amount (EUR; 0 for no change)", min_value=0.0,
+                        max_value=400.0, value=float(saved_change.get("amount_eur", 0.0)),
+                        step=10.0, format="%.2f", key="changed_monthly_amount_" + key,
+                    )
+                    change_date = st.date_input(
+                        "New amount effective from", value=default_change_date,
+                        key="monthly_change_date_" + key,
+                    )
+                    st.caption(
+                        "Use 0 to disable monthly contributions. Use 0 for the changed amount "
+                        "when the original monthly amount has not changed."
+                    )
                 plans[key] = {
                     "initial_amount_eur": initial_amount,
                     "initial_date": initial_date,
                     "monthly_amount_eur": monthly_amount,
                     "monthly_start_date": monthly_start,
+                    "monthly_changes": ([{
+                        "effective_date": change_date,
+                        "amount_eur": changed_monthly_amount,
+                    }] if changed_monthly_amount else []),
                 }
             amounts = {key: plan["initial_amount_eur"] for key, plan in plans.items()}
             active_dates = [
@@ -136,9 +181,17 @@ def main():
                     "return_since": since.isoformat(), "amounts": amounts,
                     "plans": {
                         key: {
-                            **plan,
+                            "initial_amount_eur": plan["initial_amount_eur"],
                             "initial_date": plan["initial_date"].isoformat(),
+                            "monthly_amount_eur": plan["monthly_amount_eur"],
                             "monthly_start_date": plan["monthly_start_date"].isoformat(),
+                            "monthly_changes": [
+                                {
+                                    "effective_date": change["effective_date"].isoformat(),
+                                    "amount_eur": change["amount_eur"],
+                                }
+                                for change in plan["monthly_changes"]
+                            ],
                         }
                         for key, plan in plans.items()
                     },
@@ -210,9 +263,16 @@ def main():
                     if plan["monthly_amount_eur"]
                     else "no monthly contribution"
                 )
+                change_text = ""
+                if plan.get("monthly_changes"):
+                    change = plan["monthly_changes"][0]
+                    change_text = (
+                        f"; then EUR {change['amount_eur']:,.2f}/month from "
+                        f"{change['effective_date']}"
+                    )
                 st.caption(
                     f"Initial: EUR {plan['initial_amount_eur']:,.2f} on {plan['initial_date']}  \n"
-                    f"Then: {monthly_text}  \n"
+                    f"Then: {monthly_text}{change_text}  \n"
                     f"Contributions included: {plan['contribution_count']} · "
                     f"Total paid: {fmt_eur(plan['total_contributed_eur'])}"
                 )
@@ -234,6 +294,42 @@ def main():
         st.caption("Official NLB NAV history, measured from each fund's starting NAV. Live estimates are shown above.")
     else:
         st.info("Click Refresh to load the official performance chart.")
+
+    planned_funds = [fund for fund in report["funds"] if fund.get("investment_plan")]
+    if planned_funds:
+        st.subheader("My contributions")
+        contribution_key = st.selectbox(
+            "Contribution fund", [fund["key"] for fund in planned_funds],
+            format_func=lambda key: FUNDS[key].title, key="contribution_fund",
+        )
+        contribution_fund = next(
+            fund for fund in planned_funds if fund["key"] == contribution_key
+        )
+        plan = contribution_fund["investment_plan"]
+        chart = contribution_chart(plan)
+        if chart.data:
+            st.plotly_chart(chart, width="stretch")
+        st.caption(
+            "The chart uses published NLB NAV values. Scheduled payments without a published "
+            "NAV yet are not included."
+        )
+        st.markdown("#### Transaction history")
+        transactions = [{
+            "Type": "Initial" if item["type"] == "initial" else "Monthly",
+            "Scheduled date": item["scheduled_date"],
+            "NAV date used": item["nav_date_used"],
+            "Amount (EUR)": item["amount_eur"],
+            "NAV (EUR)": item["nav_eur"],
+            "Units": item["units"],
+        } for item in plan["contributions"]]
+        st.dataframe(
+            transactions, width="stretch", hide_index=True,
+            column_config={
+                "Amount (EUR)": st.column_config.NumberColumn(format="%.2f"),
+                "NAV (EUR)": st.column_config.NumberColumn(format="%.4f"),
+                "Units": st.column_config.NumberColumn(format="%.6f"),
+            },
+        )
 
     st.subheader("Holdings")
     keys = [fund["key"] for fund in report["funds"]]

@@ -142,6 +142,11 @@ def render_text(report: dict[str, Any]) -> str:
                     f"({fmt_pct_value(plan['estimated_return_pct'])})",
                 ]
             )
+            for change in plan.get("monthly_changes", []):
+                lines.append(
+                    f"Monthly amount changes to {fmt_eur(change['amount_eur'])} "
+                    f"from {change['effective_date']}"
+                )
         since = fund["return_since_date"]
         end_label = "Estimated live" if live else "Official close"
         lines.extend(

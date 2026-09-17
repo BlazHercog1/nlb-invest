@@ -44,6 +44,25 @@ class AnalyticsTests(unittest.TestCase):
                 points, 10.0, 1000.0, date(2026, 1, 9), 20.0, date(2026, 1, 10)
             )
 
+    def test_contribution_plan_changes_monthly_amount_and_builds_value_history(self):
+        points = [
+            NavPoint(date(2026, 1, 10), 10.0, None, {}),
+            NavPoint(date(2026, 2, 10), 20.0, None, {}),
+            NavPoint(date(2026, 3, 10), 25.0, None, {}),
+        ]
+        plan = calculate_contribution_plan(
+            points, 25.0, 1000.0, date(2026, 1, 10), 100.0,
+            date(2026, 2, 10),
+            [{"effective_date": date(2026, 3, 1), "amount_eur": 150.0}],
+        )
+        self.assertEqual(
+            [item["amount_eur"] for item in plan["contributions"]],
+            [1000.0, 100.0, 150.0],
+        )
+        self.assertEqual(plan["monthly_changes"][0]["effective_date"], "2026-03-01")
+        self.assertEqual(plan["value_history"][-1]["contributed_eur"], 1250.0)
+        self.assertAlmostEqual(plan["value_history"][-1]["value_eur"], 2775.0)
+
     def test_calculate_since_date_analysis(self):
         points = [
             NavPoint(date(2026, 8, 18), 9.5, 95.0, {}),
