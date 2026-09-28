@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LOCAL = ROOT / "local"
 REPORT_PATH = LOCAL / "dashboard_report.json"
 SETTINGS_PATH = LOCAL / "dashboard_settings.json"
+TEXT_REPORT_PATH = ROOT / "latest_report.txt"
 DEFAULT_DATE = date(2026, 8, 19)
 
 
@@ -31,6 +32,13 @@ def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def write_text(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(value, encoding="utf-8")
     temporary.replace(path)
 
 
@@ -58,7 +66,7 @@ def report_exports(report: dict) -> tuple[bytes, bytes]:
 
 
 def refresh_report(
-    pdf: Path,
+    pdf: Path | list[Path],
     since: date,
     amounts: dict,
     live: bool = True,
@@ -67,7 +75,10 @@ def refresh_report(
     on_progress: Callable[[float, str], None] | None = None,
 ):
     """Refresh all funds, optionally reporting completed stages to the UI."""
-    total_steps = 2 + 2 * len(FUNDS) + 1
+    pdfs = [pdf] if isinstance(pdf, Path) else list(pdf)
+    if not pdfs:
+        raise ValueError("Choose at least one monthly holdings report.")
+    total_steps = len(pdfs) + 1 + 2 * len(FUNDS) + 1
 
     def notify(completed: int, message: str) -> None:
         if on_progress is not None:
@@ -84,36 +95,73 @@ def refresh_report(
         monthly_amount = float(plan.get("monthly_amount_eur") or 0.0)
         if initial_amount == 0 and monthly_amount == 0:
             continue
-        if initial_amount < 1000:
-            raise ValueError(f"{FUNDS[key].title}: initial investment must be at least EUR 1,000.")
-        if monthly_amount and not 40 <= monthly_amount <= 400:
-            raise ValueError(f"{FUNDS[key].title}: monthly contribution must be EUR 40 to EUR 400, or zero.")
-        if monthly_amount and plan["monthly_start_date"] <= plan["initial_date"]:
-            raise ValueError(f"{FUNDS[key].title}: first monthly contribution must be after the initial investment date.")
+        if initial_amount and initial_amount < 1000:
+            raise ValueError(
+                f"{FUNDS[key].title}: one-time initial investment must be at least EUR 1,000, or zero."
+            )
+        if monthly_amount and not 40 <= monthly_amount <= 500:
+            raise ValueError(
+                f"{FUNDS[key].title}: savings-plan contribution must be EUR 40 to EUR 500, or zero."
+            )
+        if (
+            initial_amount and monthly_amount
+            and plan["monthly_start_date"] <= plan["initial_date"]
+        ):
+            raise ValueError(
+                f"{FUNDS[key].title}: first savings-plan contribution must be after "
+                "the initial investment date."
+            )
         for change in plan.get("monthly_changes", []):
             changed_amount = float(change.get("amount_eur") or 0.0)
             if not monthly_amount:
                 raise ValueError(f"{FUNDS[key].title}: set a monthly contribution before adding an amount change.")
-            if not 40 <= changed_amount <= 400:
-                raise ValueError(f"{FUNDS[key].title}: changed monthly contribution must be EUR 40 to EUR 400.")
+            if not 40 <= changed_amount <= 500:
+                raise ValueError(
+                    f"{FUNDS[key].title}: changed savings-plan contribution "
+                    "must be EUR 40 to EUR 500."
+                )
             if change["effective_date"] <= plan["monthly_start_date"]:
                 raise ValueError(f"{FUNDS[key].title}: monthly amount change must be after the first monthly contribution.")
-    notify(0, "Reading the monthly PDF...")
-    text = extract_pdf_text(pdf)
-    notify(1, "Parsing the disclosed fund holdings...")
-    parsed = {key: parse_holdings(text, fund) for key, fund in FUNDS.items()}
+    parsed = {key: [] for key in FUNDS}
+    for pdf_index, pdf_path in enumerate(pdfs):
+        notify(pdf_index, f"Reading monthly PDF {pdf_index + 1}/{len(pdfs)}...")
+        text = extract_pdf_text(pdf_path)
+        for key, fund in FUNDS.items():
+            holdings_date, holdings = parse_holdings(text, fund)
+            parsed[key].append((holdings_date, holdings, pdf_path.name))
+    notify(len(pdfs), "Ordering the monthly holdings snapshots...")
+    for key in parsed:
+        by_date = {
+            holdings_date: (holdings, source_name)
+            for holdings_date, holdings, source_name in parsed[key]
+        }
+        parsed[key] = [
+            (holdings_date, *by_date[holdings_date])
+            for holdings_date in sorted(by_date)
+        ]
     nlb, yahoo = NlbClient(), YahooClient(ROOT / "ticker_cache.json")
     reports = []
     for index, (key, fund) in enumerate(FUNDS.items()):
-        holdings_date, holdings = parsed[key]
+        fund_snapshots = parsed[key]
+        holdings_date, holdings, _ = fund_snapshots[-1]
         plan = plans.get(key)
-        plan_active = bool(plan and (plan.get("initial_amount_eur") or plan.get("monthly_amount_eur")))
-        analysis_start = plan["initial_date"] if plan_active else since
+        plan_active = bool(
+            plan and (plan.get("initial_amount_eur") or plan.get("monthly_amount_eur"))
+        )
+        if plan_active:
+            contribution_dates = []
+            if plan.get("initial_amount_eur"):
+                contribution_dates.append(plan["initial_date"])
+            if plan.get("monthly_amount_eur"):
+                contribution_dates.append(plan["monthly_start_date"])
+            analysis_start = min(contribution_dates)
+        else:
+            analysis_start = since
         start = min(
-            today - timedelta(days=400), holdings_date - timedelta(days=7),
+            today - timedelta(days=400), fund_snapshots[0][0] - timedelta(days=7),
             analysis_start - timedelta(days=7),
         )
-        stage = 2 + 2 * index
+        stage = len(pdfs) + 1 + 2 * index
         label = f"Fund {index + 1}/{len(FUNDS)}: {fund.title}"
         notify(stage, f"{label}: fetching official NLB values...")
         nav = nlb.get_nav_history(fund, start, today)
@@ -121,7 +169,14 @@ def refresh_report(
         result = analyze_fund(
             fund, holdings_date, holdings, nav, yahoo, today, 90.0, 6,
             None if plan_active else (amounts.get(key) or None), live, analysis_start,
+            [(snapshot_date, snapshot_holdings) for snapshot_date, snapshot_holdings, _ in fund_snapshots],
         )
+        sources_by_date = {
+            snapshot_date.isoformat(): source_name
+            for snapshot_date, _, source_name in fund_snapshots
+        }
+        for period in result["holding_periods"]:
+            period["source_pdf"] = sources_by_date[period["holdings_date"]]
         official_date = date.fromisoformat(result["metrics"]["latest_date"])
         if plan_active:
             investment = calculate_contribution_plan(
@@ -144,9 +199,13 @@ def refresh_report(
         notify(stage + 2, f"{label}: complete")
     notify(total_steps - 1, "Saving the updated report...")
     yahoo.save_cache()
+    source_pdfs = list(dict.fromkeys(
+        source_name for _, _, source_name in parsed[next(iter(FUNDS))]
+    ))
     report = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "as_of": today.isoformat(), "source_pdf": pdf.name,
+        "as_of": today.isoformat(), "source_pdf": source_pdfs[-1],
+        "source_pdfs": source_pdfs,
         "return_since": since.isoformat(), "market_mode": "live" if live else "official-close",
         "investment_mode": (
             "contribution-plan"
@@ -160,5 +219,6 @@ def refresh_report(
         "investment_summary": build_investment_summary(reports), "funds": reports,
     }
     write_json(REPORT_PATH, report)
+    write_text(TEXT_REPORT_PATH, render_text(report))
     notify(total_steps, "Report saved.")
     return report

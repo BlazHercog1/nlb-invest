@@ -1,11 +1,12 @@
 import unittest
 from datetime import date
+from unittest.mock import Mock
 
 from nlb_invest.analytics import (
-    add_months, calculate_contribution_plan, calculate_since_date_analysis, nav_metrics,
-    return_between,
+    add_months, analyze_fund, calculate_contribution_plan,
+    calculate_since_date_analysis, nav_metrics, return_between,
 )
-from nlb_invest.models import MarketPoint, NavPoint
+from nlb_invest.models import FUNDS, Holding, MarketPoint, NavPoint
 
 
 class AnalyticsTests(unittest.TestCase):
@@ -39,10 +40,28 @@ class AnalyticsTests(unittest.TestCase):
         points = [NavPoint(date(2026, 1, 10), 10.0, None, {})]
         with self.assertRaisesRegex(ValueError, "at least EUR 1,000"):
             calculate_contribution_plan(points, 10.0, 999.0, date(2026, 1, 10))
-        with self.assertRaisesRegex(ValueError, "EUR 40 to EUR 400"):
+        with self.assertRaisesRegex(ValueError, "EUR 40 to EUR 500"):
             calculate_contribution_plan(
                 points, 10.0, 1000.0, date(2026, 1, 9), 20.0, date(2026, 1, 10)
             )
+        plan = calculate_contribution_plan(
+            points, 10.0, 0.0, date(2026, 1, 1), 500.0, date(2026, 1, 10)
+        )
+        self.assertEqual(plan["monthly_contribution_count"], 1)
+        self.assertIsNone(plan["initial_nav_date_used"])
+        self.assertEqual(
+            plan["contributions"][0]["fifteen_year_holding_date"], "2041-01-10"
+        )
+        with self.assertRaisesRegex(ValueError, "EUR 40 to EUR 500"):
+            calculate_contribution_plan(
+                points, 10.0, 0.0, date(2026, 1, 1), 501.0, date(2026, 1, 10)
+            )
+        future = calculate_contribution_plan(
+            points, 10.0, 0.0, date(2026, 1, 1), 100.0, date(2026, 2, 10)
+        )
+        self.assertEqual(future["total_contributed_eur"], 0)
+        self.assertEqual(future["accumulated_units"], 0)
+        self.assertIsNone(future["estimated_return_pct"])
 
     def test_contribution_plan_changes_monthly_amount_and_builds_value_history(self):
         points = [
@@ -102,3 +121,39 @@ class AnalyticsTests(unittest.TestCase):
         self.assertAlmostEqual(result, 0.05)
         self.assertEqual(first_day, date(2026, 7, 31))
         self.assertEqual(last_day, date(2026, 8, 25))
+
+    def test_holding_attribution_uses_each_monthly_snapshot_for_its_period(self):
+        july = Holding(1, "US0000000001", "July holding", "ZDA", 100.0)
+        august = Holding(1, "US0000000002", "August holding", "ZDA", 100.0)
+        nav = [
+            NavPoint(date(2026, 7, 31), 100.0, None, {}),
+            NavPoint(date(2026, 8, 31), 110.0, None, {}),
+            NavPoint(date(2026, 9, 30), 132.0, None, {}),
+        ]
+        yahoo = Mock()
+        yahoo.resolve_isin.side_effect = lambda holding: holding.isin
+
+        def eur_returns(symbol, start, official_nav_date, end, *, live):
+            period_return = 0.10 if start == date(2026, 7, 31) else 0.20
+            return (
+                period_return, period_return, 0.0, "EUR", start, end,
+                "2026-09-30T16:00:00+00:00",
+            )
+
+        yahoo.eur_returns.side_effect = eur_returns
+        result = analyze_fund(
+            FUNDS["tech"], date(2026, 8, 31), [august], nav, yahoo,
+            date(2026, 9, 30), 90.0, 1, None, False, date(2026, 7, 31),
+            [(date(2026, 7, 31), [july]), (date(2026, 8, 31), [august])],
+        )
+
+        self.assertEqual(result["holdings_snapshot_count"], 2)
+        self.assertEqual(
+            [period["holdings_date"] for period in result["holding_periods"]],
+            ["2026-07-31", "2026-08-31"],
+        )
+        self.assertAlmostEqual(result["holding_periods"][0]["estimated_equity_contribution_pct"], 10.0)
+        self.assertAlmostEqual(result["holding_periods"][1]["estimated_equity_contribution_pct"], 20.0)
+        self.assertAlmostEqual(result["aligned_contribution_pct"], 32.0)
+        self.assertAlmostEqual(result["official_return_since_holdings_pct"], 32.0)
+        self.assertAlmostEqual(result["tracking_gap_pct"], 0.0)

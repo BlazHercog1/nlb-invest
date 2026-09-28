@@ -81,6 +81,8 @@ def render_text(report: dict[str, Any]) -> str:
     for fund in report["funds"]:
         metrics = fund["metrics"]
         live = fund["market_mode"] == "live"
+        holdings_start = fund.get("holdings_start_date", fund["holdings_date"])
+        snapshot_count = fund.get("holdings_snapshot_count", 1)
         lines.extend(
             [
                 "",
@@ -98,7 +100,7 @@ def render_text(report: dict[str, Any]) -> str:
                     if live
                     else []
                 ),
-                f"Official return since disclosed holdings ({fund['holdings_date']}): "
+                f"Official return across holdings history ({holdings_start}): "
                 f"{fmt_pct_value(fund['official_return_since_holdings_pct'])}",
                 *(
                     [
@@ -133,8 +135,13 @@ def render_text(report: dict[str, Any]) -> str:
             )
             lines.extend(
                 [
-                    f"Initial investment: {fmt_eur(plan['initial_amount_eur'])} on {plan['initial_date']} "
-                    f"(NAV date used: {plan['initial_nav_date_used']})",
+                    (
+                        f"Initial investment: {fmt_eur(plan['initial_amount_eur'])} "
+                        f"on {plan['initial_date']} "
+                        f"(NAV date used: {plan['initial_nav_date_used']})"
+                        if plan["initial_amount_eur"]
+                        else "Initial investment: none"
+                    ),
                     f"Monthly contribution: {monthly}",
                     f"Contributions included: {plan['contribution_count']} | "
                     f"accumulated units: {plan['accumulated_units']:.6f}",
@@ -170,8 +177,9 @@ def render_text(report: dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                f"Holdings attribution: {fund['position_count']} PDF positions, "
+                f"Latest holdings attribution: {fund['position_count']} PDF positions, "
                 f"{fund['disclosed_equity_weight_pct']:.2f}% of fund NAV disclosed as equities.",
+                f"Monthly holdings snapshots used: {snapshot_count}.",
                 f"Market data covers {fund['tracked_weight_pct']:.2f}% of fund NAV "
                 f"({fund['tracked_share_of_disclosed_pct']:.1f}% of disclosed equities).",
                 f"Equity contribution through official NAV date: "
@@ -208,14 +216,26 @@ def render_text(report: dict[str, Any]) -> str:
                 f"\nUnresolved/failed selected positions: {len(unresolved)} ({missing_weight:.2f}% weight). "
                 "See JSON output or ticker_cache.json for details."
             )
+        periods = fund.get("holding_periods", [])
+        if len(periods) > 1:
+            lines.extend(["", "Monthly allocation periods:"])
+            for period in periods:
+                source = period.get("source_pdf")
+                source_text = f" ({source})" if source else ""
+                lines.append(
+                    f"  {period['holdings_date']} to {period['end_date']}{source_text}: "
+                    f"equity contribution "
+                    f"{fmt_pct_value(period['estimated_equity_contribution_pct'])}"
+                )
     lines.extend(
         [
             "",
             "Interpretation",
             "--------------",
             "Official NLB NAV is the source of truth. Holdings attribution is an estimate using",
-            "the fixed weights in the supplied monthly PDF, adjusted into EUR. It cannot capture",
-            "later trades, fees, cash, derivatives, or the balanced fund's direct bond sleeve.",
+            "each supplied monthly PDF's weights until the next snapshot, adjusted into EUR.",
+            "It cannot capture trades between reports, fees, cash, derivatives, or the balanced",
+            "fund's direct bond sleeve.",
         ]
     )
     if report["market_mode"] == "live":
