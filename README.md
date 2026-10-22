@@ -7,7 +7,9 @@ It is not an official NLB or Yahoo Finance product.
 This tracker combines three views of the funds:
 
 - Official daily NLB unit values (VEP/NAV) are used for the fund's actual performance.
-- Equity holdings and weights are extracted from the supplied monthly PDF. Yahoo Finance prices explain which disclosed companies contributed to performance after the report date.
+- Equity holdings and weights are extracted from the supplied monthly PDFs. Each
+  allocation is applied only until the next report takes over, and Yahoo Finance
+  prices explain which disclosed companies contributed during each period.
 - A live estimate starts with NLB's latest official NAV and applies the latest available Yahoo/FX movement since that NAV date.
 
 The split matters for **Globalni uravnoteženi**: Yahoo does not reliably price its direct bond holdings, so the official NLB NAV remains the source of truth.
@@ -26,10 +28,13 @@ report from [NLB Skladi](https://www.nlbskladi.si), save it locally, and supply 
 path with `--pdf`. The parser expects NLB's monthly-report table layout; it does
 not support arbitrary PDFs or other providers.
 
-Then run the tracker with your local report:
+Then run the tracker with your local reports. Repeat `--pdf` in chronological or
+any other order; the tracker orders them by their disclosed holdings dates:
 
 ```powershell
-py -3 -m nlb_invest --pdf "path/to/monthly_report.pdf"
+py -3 -m nlb_invest `
+  --pdf "path/to/july_report.pdf" `
+  --pdf "path/to/august_report.pdf"
 ```
 
 On macOS/Linux, use `python3` instead of `py -3` in the commands below.
@@ -43,9 +48,12 @@ Live estimation is the default. The report includes Yahoo's earliest and latest 
 
 Each fund also has a dedicated return/earnings section starting on **2026-08-19**. It shows the official NLB return, the estimated live return, and the estimated gain per EUR 1,000. When `--invested-tech`, `--invested-balanced`, or `--invested-developed` is supplied, it also estimates the current value and gain/loss for that invested amount.
 
-## My Investments
+## My Investments (command line)
 
-The personal tracking is intentionally simple: enter how much money you invested in each fund. You do not need to track units, transactions, fees, XIRR, allocation targets, or rebalancing.
+Enter a single amount invested in each fund, or reuse the initial-plus-monthly
+contribution plan saved by the browser dashboard. The supplied
+`run_tracker.ps1` uses `local/dashboard_settings.json`, so its scheduled refresh
+keeps the contribution totals and gain/loss figures in `latest_report.txt`.
 
 The tracker treats those amounts as invested from the `--return-since` date. By default that date is `2026-08-19`; change it if your invested amount should be measured from another day.
 
@@ -73,6 +81,9 @@ Useful options:
 # Estimate your current value when you know how much money you invested
 py -3 -m nlb_invest --invested-tech 1000 --invested-balanced 1000 --invested-developed 1000
 
+# Reuse the initial and monthly contributions saved by the dashboard
+py -3 -m nlb_invest --investment-settings local/dashboard_settings.json
+
 # Machine-readable report
 py -3 -m nlb_invest --format json --output latest_report.json
 
@@ -97,12 +108,14 @@ py -3 -m unittest discover -s tests -v
 
 ## Keep it current
 
-`run_tracker.ps1` updates `latest_report.txt`. To run it each weekday at 19:00, open Task Scheduler, create a basic task, and use:
+`run_tracker.ps1` updates `latest_report.txt` and `local/dashboard_report.json`, so scheduled refreshes also update the browser dashboard. To run it each weekday at 19:00, open Task Scheduler, create a basic task, and use:
 
 - Program: `powershell.exe`
 - Arguments: `-NoProfile -ExecutionPolicy Bypass -File "C:\path\to\Finance\run_tracker.ps1"`
 
-When NLB publishes a new monthly report, replace the PDF and update the filename in `run_tracker.ps1` if its name changes. Use `--refresh-symbols` once so newly added ISINs are resolved.
+When NLB publishes a new monthly report, keep the earlier PDFs and add the new
+one to `run_tracker.ps1`. Use `--refresh-symbols` once so newly added ISINs are
+resolved.
 
 ## Privacy and repository contents
 
@@ -145,10 +158,47 @@ Double-click **Open dashboard.cmd**, or run `powershell -ExecutionPolicy Bypass 
 The dashboard runs locally at http://127.0.0.1:8501. Keep its launcher window open;
 close it to stop the dashboard.
 
-Enter investment amounts and their common start date, choose an NLB monthly PDF,
-and click **Refresh**. The dashboard shows fund returns, estimated investment
-values, official NAV performance charts and the disclosed holdings. It reuses
-the command-line tracker's calculations. A refresh can take a few minutes.
+For each fund, enter either a one-off investment of at least EUR 1,000, a
+savings-plan contribution from EUR 40 to EUR 500, or both. Choose the initial
+and first monthly contribution dates and, if applicable, one later monthly-amount
+change.
+Then select all available NLB monthly PDFs and click **Refresh**. Each report's
+holdings mix is used until the next monthly report takes over. This improves the
+holdings attribution as the fund manager changes the portfolio.
+Each scheduled payment buys estimated units using the first published NLB NAV on
+or after its date. Because every EUR 50 payment buys fund units, its actual value
+is driven by NLB's NAV history; it does not remain tied to the holdings mix from
+the month when it was paid. The dashboard shows total contributions, estimated investment
+values, a contribution-versus-value chart, the generated transaction history,
+official NAV performance charts and the disclosed holdings.
+
+**Your monthly story** separates added money from investment earnings. Choose a
+month to see opening and closing values and a breakdown by fund. The current
+month ends at the latest common published NLB date; deposits count on their
+purchase/NAV date, and entered fees reduce earnings.
+
+Under **My contributions > Manage payments**, confirm, skip or edit a scheduled
+payment, restore its estimate, or add an extra payment. Enter the amount paid
+(including any fee), the purchase date, and optionally the actual units received
+from your statement. If units are omitted, they are estimated as
+(amount paid - fee) / first published NAV on or after the purchase date.
+Confirmed payments verify that a payment happened; their units may still be
+estimated. Skipped payments and payments awaiting a published NAV are excluded
+from the balance. Recorded payments survive later plan changes.
+
+Payment edits recalculate the saved report immediately with existing prices and
+update the text/JSON exports; they do not fetch new market data. Click **Refresh**
+to get new prices. The scheduled CLI refresh reuses these same payment records and saves a dashboard
+snapshot with NAV history. An open dashboard picks up newer snapshots on its
+next interaction.
+The transaction history shows each payment's current value, euro gain/loss and
+return using the latest published NLB NAV. Existing saved plans continue to work
+and their generated payments are marked Estimated. Withdrawals are not supported.
+
+The dashboard records the
+15-year holding date for each payment under the tax explanation currently
+published by NLB; this is informational and is not a tax calculation. A refresh
+can take a few minutes.
 The progress bar shows PDF parsing, NLB values and holding prices for each fund,
 then saving. It advances by completed stages rather than elapsed time.
 
@@ -160,9 +210,43 @@ Files are downloaded through your browser as `latest_report.txt` and
 
 Settings, uploaded PDFs and the last successful dashboard report are stored in
 the ignored `local/` directory. Reopening the dashboard shows saved results;
-no network refresh occurs until you click Refresh. It can also display an existing
-`latest_report.json`; refresh once to add chart history. A failed refresh keeps
-the previous results visible. The original command-line reports remain separate.
+when a new monthly payment is due, the dashboard automatically refreshes the
+saved plan and prices on opening or rerunning. A payment on the 15th repeats on
+the 15th of every month; the original date is its first occurrence. The overview
+shows the latest included monthly payment and the next scheduled payment.
+If prices are unavailable, due payments remain visible as pending NAV; no earlier
+price is substituted. Automatic checks retry on the next day, and **Refresh**
+can retry immediately. It can also display an existing
+`latest_report.json`; refresh once to add chart history. A successful dashboard
+refresh also updates the root `latest_report.txt`, including initial and monthly
+contributions, their estimated current values, and the resulting gain or loss.
+A failed refresh keeps the previous results visible. Invalid payment edits leave saved results unchanged.
+
+## NLB savings-plan rules represented in the dashboard
+
+The contribution-plan inputs follow the public NLB Skladi terms checked in
+September 2026:
+
+- a one-off fund purchase starts at EUR 1,000;
+- a savings-plan payment is EUR 40-EUR 500, and no fixed payment frequency is
+  required (NLB recommends a monthly standing order);
+- advertised entry-cost discounts are 15% for EUR 40-59.99, 33.33% for
+  EUR 60-149.99, and 50% for EUR 150-500; minors have no entry cost until age
+  18;
+- the published capital-gains rates are 25% through five years, 20% after five,
+  15% after ten, and 0% after fifteen years; every payment has its own holding
+  period and FIFO applies;
+- redemptions are available at any time and NLB says proceeds are paid within
+  six business days.
+
+The dashboard shows these rules for planning and records each payment's
+15-year holding date. It does not automatically deduct entry/exit costs or
+calculate tax because promotions, investor status, fund, realized price, and
+personal circumstances can change the actual result.
+
+Official references: [NLB savings plan](https://www.nlbskladi.si/nalozbene-moznosti/nacini-varcevanja/postopno-varcevanje-z-varcevalnim-nacrtom),
+[NLB fund and pricing example](https://www.nlbskladi.si/nalozbene-moznosti/vzajemni-skladi/svetovni-razviti-trgi-delniski),
+and [NLB tax overview](https://www.nlbskladi.si/osnove-in-strategije-investiranja/osnove-investiranja/zakaj-varcevati-v-vzajemnih-skladih).
 
 ## Project structure
 

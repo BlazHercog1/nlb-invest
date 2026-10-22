@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from .models import FUNDS
+from .payments import monthly_story, story_months
 
 
 def fmt_pct(value: float | None, decimals: int = 2) -> str:
@@ -40,11 +41,16 @@ def build_investment_summary(funds: list[dict[str, Any]]) -> dict[str, Any] | No
 
 def render_investment_summary(report: dict[str, Any]) -> list[str]:
     summary = report["investment_summary"]
+    contribution_plans = any(fund.get("investment_plan") for fund in report["funds"])
     lines = [
         "",
         "MY INVESTMENTS",
         "--------------",
-        f"Based on money invested since: {report['return_since']}",
+        *(
+            ["Includes initial, monthly and extra payments. Unconfirmed scheduled payments are estimates."]
+            if contribution_plans
+            else [f"Based on money invested since: {report['return_since']}"]
+        ),
         f"Total invested:                {fmt_eur(summary['total_invested_eur'])}",
         f"Estimated current value:       {fmt_eur(summary['estimated_current_value_eur'])}",
         f"Estimated gain / loss:         {fmt_eur(summary['estimated_gain_eur'])}",
@@ -55,11 +61,11 @@ def render_investment_summary(report: dict[str, Any]) -> list[str]:
     for fund in report["funds"]:
         if fund["invested_eur"] is None:
             continue
-        since = fund["return_since_date"]
+        gain = fund["current_value_eur"] - fund["invested_eur"]
         lines.append(
             f"{fund_display_name(fund['key']):<29} {fmt_eur(fund['invested_eur']):>14} "
             f"{fmt_eur(fund['current_value_eur']):>14} "
-            f"{fmt_eur(since['estimated_gain_for_investment_eur']):>14}"
+            f"{fmt_eur(gain):>14}"
         )
     return lines
 
@@ -76,6 +82,8 @@ def render_text(report: dict[str, Any]) -> str:
     for fund in report["funds"]:
         metrics = fund["metrics"]
         live = fund["market_mode"] == "live"
+        holdings_start = fund.get("holdings_start_date", fund["holdings_date"])
+        snapshot_count = fund.get("holdings_snapshot_count", 1)
         lines.extend(
             [
                 "",
@@ -93,7 +101,7 @@ def render_text(report: dict[str, Any]) -> str:
                     if live
                     else []
                 ),
-                f"Official return since disclosed holdings ({fund['holdings_date']}): "
+                f"Official return across holdings history ({holdings_start}): "
                 f"{fmt_pct_value(fund['official_return_since_holdings_pct'])}",
                 *(
                     [
@@ -112,10 +120,68 @@ def render_text(report: dict[str, Any]) -> str:
         )
         if fund["invested_eur"] is not None:
             value_label = "Estimated live value" if live else "Value at official NAV"
+            investment_label = (
+                "total contributions" if fund.get("investment_plan") else "investment"
+            )
             lines.append(
-                f"{value_label} of your {fmt_eur(fund['invested_eur'])} investment: "
+                f"{value_label} of your {fmt_eur(fund['invested_eur'])} {investment_label}: "
                 f"{fmt_eur(fund['current_value_eur'])}"
             )
+        plan = fund.get("investment_plan")
+        if plan:
+            monthly = (
+                f"{fmt_eur(plan['monthly_amount_eur'])} from {plan['monthly_start_date']}"
+                if plan["monthly_amount_eur"]
+                else "none"
+            )
+            lines.extend(
+                [
+                    (
+                        f"Initial investment: {fmt_eur(plan['initial_amount_eur'])} "
+                        f"on {plan['initial_date']} "
+                        f"(NAV date used: {plan['initial_nav_date_used']})"
+                        if plan["initial_amount_eur"]
+                        else "Initial investment: none"
+                    ),
+                    f"Monthly contribution: {monthly}",
+                    f"Contributions included: {plan['contribution_count']} | "
+                    f"accumulated units: {plan['accumulated_units']:.6f}",
+                    f"Estimated investment gain / loss: {fmt_eur(plan['estimated_gain_eur'])} "
+                    f"({fmt_pct_value(plan['estimated_return_pct'])})",
+                ]
+            )
+            for change in plan.get("monthly_changes", []):
+                lines.append(
+                    f"Monthly amount changes to {fmt_eur(change['amount_eur'])} "
+                    f"from {change['effective_date']}"
+                )
+            if "payments" in plan:
+                lines.append(
+                    f"Payments included: {plan['confirmed_payment_count']} confirmed, "
+                    f"{plan['estimated_payment_count']} estimated; "
+                    f"{plan['skipped_payment_count']} skipped, {plan['pending_payment_count']} pending."
+                )
+                lines.append(f"Fees included in gain/loss: {fmt_eur(plan['total_fees_eur'])}")
+                months = story_months([fund])
+                if months:
+                    story = monthly_story([fund], months[-1])
+                    lines.append(
+                        f"Monthly story {story['month']} through {story['through']}: "
+                        f"added {fmt_eur(story['added_eur'])}; "
+                        f"investment gain/loss {fmt_eur(story['gain_eur'])}; "
+                        f"balance change {fmt_eur(story['balance_change_eur'])}."
+                    )
+                lines.append(f"Payment history (valued at official NAV on {metrics['latest_date']}):")
+                for payment in plan["payments"]:
+                    value = payment.get("official_value_eur")
+                    gain = payment.get("official_gain_eur")
+                    lines.append(
+                        f"  {payment['scheduled_date']} {payment['type']} "
+                        f"[{payment['status']}; {payment['settlement']}] "
+                        f"paid {fmt_eur(payment['amount_eur'])}; "
+                        f"fee {fmt_eur(payment.get('fee_eur', 0))}; "
+                        f"value {fmt_eur(value)}; gain/loss {fmt_eur(gain)}"
+                    )
         since = fund["return_since_date"]
         end_label = "Estimated live" if live else "Official close"
         lines.extend(
@@ -139,8 +205,9 @@ def render_text(report: dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                f"Holdings attribution: {fund['position_count']} PDF positions, "
+                f"Latest holdings attribution: {fund['position_count']} PDF positions, "
                 f"{fund['disclosed_equity_weight_pct']:.2f}% of fund NAV disclosed as equities.",
+                f"Monthly holdings snapshots used: {snapshot_count}.",
                 f"Market data covers {fund['tracked_weight_pct']:.2f}% of fund NAV "
                 f"({fund['tracked_share_of_disclosed_pct']:.1f}% of disclosed equities).",
                 f"Equity contribution through official NAV date: "
@@ -177,14 +244,26 @@ def render_text(report: dict[str, Any]) -> str:
                 f"\nUnresolved/failed selected positions: {len(unresolved)} ({missing_weight:.2f}% weight). "
                 "See JSON output or ticker_cache.json for details."
             )
+        periods = fund.get("holding_periods", [])
+        if len(periods) > 1:
+            lines.extend(["", "Monthly allocation periods:"])
+            for period in periods:
+                source = period.get("source_pdf")
+                source_text = f" ({source})" if source else ""
+                lines.append(
+                    f"  {period['holdings_date']} to {period['end_date']}{source_text}: "
+                    f"equity contribution "
+                    f"{fmt_pct_value(period['estimated_equity_contribution_pct'])}"
+                )
     lines.extend(
         [
             "",
             "Interpretation",
             "--------------",
             "Official NLB NAV is the source of truth. Holdings attribution is an estimate using",
-            "the fixed weights in the supplied monthly PDF, adjusted into EUR. It cannot capture",
-            "later trades, fees, cash, derivatives, or the balanced fund's direct bond sleeve.",
+            "each supplied monthly PDF's weights until the next snapshot, adjusted into EUR.",
+            "It cannot capture trades between reports, fees, cash, derivatives, or the balanced",
+            "fund's direct bond sleeve.",
         ]
     )
     if report["market_mode"] == "live":

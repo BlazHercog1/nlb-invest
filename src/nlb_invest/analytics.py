@@ -1,6 +1,7 @@
 """Calculate fund performance, holding contributions and live NAV estimates."""
 from __future__ import annotations
 
+import calendar
 import concurrent.futures
 import math
 import statistics
@@ -9,9 +10,180 @@ from datetime import date, timedelta
 from typing import Any, TYPE_CHECKING
 
 from .models import FundConfig, Holding, HoldingResult, MarketPoint, NavPoint
+from .payments import finite_amount, normalize_payments, payment_date
 
 if TYPE_CHECKING:
     from .yahoo_client import YahooClient
+
+
+def add_months(value: date, months: int = 1) -> date:
+    """Move a date by whole calendar months, clamping to the month's last day."""
+    month_index = value.year * 12 + value.month - 1 + months
+    year, month_zero_based = divmod(month_index, 12)
+    month = month_zero_based + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def calculate_contribution_plan(
+    points: list[NavPoint],
+    estimated_live_nav: float,
+    initial_amount_eur: float,
+    initial_date: date,
+    monthly_amount_eur: float = 0.0,
+    monthly_start_date: date | None = None,
+    monthly_changes: list[dict[str, Any]] | None = None,
+    payment_records: list[dict] | None = None,
+    *,
+    as_of: date | None = None,
+) -> dict[str, Any]:
+    """Value scheduled estimates and recorded purchases without double counting."""
+    initial_amount_eur = finite_amount(initial_amount_eur, "Initial investment")
+    monthly_amount_eur = finite_amount(monthly_amount_eur, "Monthly contribution")
+    estimated_live_nav = finite_amount(estimated_live_nav, "Estimated NAV", positive=True)
+    initial_date = payment_date(initial_date)
+    monthly_start_date = payment_date(monthly_start_date) if monthly_start_date else None
+    records = normalize_payments(payment_records)
+    if initial_amount_eur and initial_amount_eur < 1000:
+        raise ValueError("A one-time initial investment must be at least EUR 1,000, or zero.")
+    if monthly_amount_eur and not 40 <= monthly_amount_eur <= 500:
+        raise ValueError("The savings-plan contribution must be EUR 40 to EUR 500, or zero.")
+    if not initial_amount_eur and not monthly_amount_eur and not records:
+        raise ValueError("Enter an initial investment or a savings-plan contribution.")
+    if monthly_amount_eur and monthly_start_date is None:
+        raise ValueError("Choose the first monthly contribution date.")
+    if initial_amount_eur and monthly_amount_eur and monthly_start_date <= initial_date:
+        raise ValueError("The first savings-plan contribution must be after the initial investment date.")
+    normalized_changes = sorted([
+        {"effective_date": payment_date(change["effective_date"]),
+         "amount_eur": finite_amount(change["amount_eur"], "Changed monthly amount")}
+        for change in monthly_changes or []
+    ], key=lambda change: change["effective_date"])
+    for change in normalized_changes:
+        if not monthly_amount_eur:
+            raise ValueError("A monthly amount change requires an existing monthly contribution.")
+        if not 40 <= change["amount_eur"] <= 500:
+            raise ValueError("A changed savings-plan contribution must be EUR 40 to EUR 500.")
+        if change["effective_date"] <= monthly_start_date:
+            raise ValueError("A monthly amount change must take effect after the first monthly contribution.")
+    if not points:
+        raise RuntimeError("No NLB NAV history is available for the investment plan.")
+    official_points = sorted(
+        (point for point in points if as_of is None or point.day <= as_of),
+        key=lambda point: point.day,
+    )
+    if not official_points:
+        raise RuntimeError("No published NLB NAV is available on or before the valuation date.")
+    for point in official_points:
+        finite_amount(point.nav, "NLB NAV", positive=True)
+    latest = official_points[-1]
+    cutoff = as_of or latest.day
+    scheduled_payments = {}
+
+    def schedule(day: date, amount: float, kind: str) -> None:
+        identifier = f"{kind}:{day.isoformat()}"
+        scheduled_payments[identifier] = {
+            "id": identifier, "type": kind, "scheduled_date": day.isoformat(),
+            "amount_eur": amount, "fee_eur": 0.0, "status": "estimated",
+        }
+
+    if initial_amount_eur:
+        schedule(initial_date, initial_amount_eur, "initial")
+    if monthly_amount_eur:
+        month_number = 0
+        scheduled = monthly_start_date
+        while scheduled <= cutoff:
+            amount = monthly_amount_eur
+            for change in normalized_changes:
+                if change["effective_date"] <= scheduled:
+                    amount = change["amount_eur"]
+            schedule(scheduled, amount, "monthly")
+            month_number += 1
+            scheduled = add_months(monthly_start_date, month_number)
+    for record in records:
+        # IDs replace their scheduled estimate. Saved records also survive plan changes.
+        base = scheduled_payments.get(record["id"], {})
+        scheduled_payments[record["id"]] = {**base, **record}
+
+    payments, contributions = [], []
+    for item in scheduled_payments.values():
+        item = dict(item)
+        amount = finite_amount(item.get("amount_eur"), "Payment amount", positive=True)
+        fee = finite_amount(item.get("fee_eur", 0), "Payment fee")
+        if fee >= amount:
+            raise ValueError("Payment fee must be less than the amount paid.")
+        requested = payment_date(item.get("actual_date") or item["scheduled_date"])
+        nav_point = next((point for point in official_points if point.day >= requested), None)
+        item.update(included=False, nav_date_used=None, nav_eur=None, units=None,
+                    official_value_eur=None, official_gain_eur=None, official_return_pct=None,
+                    estimated_current_value_eur=None, estimated_gain_eur=None)
+        if item["status"] == "skipped":
+            item["settlement"] = "skipped"
+        elif nav_point is None or requested > cutoff:
+            item["settlement"] = "pending"
+        else:
+            entered_units = next((record.get("units") for record in records
+                                  if record["id"] == item["id"]), None)
+            units = entered_units if entered_units is not None else (amount - fee) / nav_point.nav
+            official_value = units * latest.nav
+            live_value = units * estimated_live_nav
+            item.update(
+                included=True, settlement="included", nav_date_used=nav_point.day.isoformat(),
+                nav_eur=nav_point.nav, units=units,
+                units_source="entered" if entered_units is not None else "estimated",
+                net_amount_eur=amount - fee,
+                fifteen_year_holding_date=add_months(nav_point.day, 180).isoformat(),
+                official_value_eur=official_value, official_gain_eur=official_value - amount,
+                official_return_pct=(official_value / amount - 1) * 100,
+                estimated_current_value_eur=live_value, estimated_gain_eur=live_value - amount,
+            )
+            contributions.append(item)
+        payments.append(item)
+    payments.sort(key=lambda p: (p["scheduled_date"], p["id"]))
+    contributions.sort(key=lambda p: (p["nav_date_used"], p["id"]))
+    total_contributed = sum(item["amount_eur"] for item in contributions)
+    accumulated_units = sum(item["units"] for item in contributions)
+    official_value = accumulated_units * latest.nav
+    estimated_value = accumulated_units * estimated_live_nav
+    gain = estimated_value - total_contributed
+    value_history = []
+    for nav_point in official_points:
+        purchased = [item for item in contributions
+                     if item["nav_date_used"] <= nav_point.day.isoformat()]
+        if not purchased:
+            continue
+        contributed = sum(item["amount_eur"] for item in purchased)
+        units = sum(item["units"] for item in purchased)
+        value = units * nav_point.nav
+        value_history.append({
+            "date": nav_point.day.isoformat(), "contributed_eur": contributed,
+            "value_eur": value, "gain_eur": value - contributed,
+        })
+    initial = next((p for p in contributions if p["type"] == "initial"), None)
+    return {
+        "initial_amount_eur": initial_amount_eur, "initial_date": initial_date.isoformat(),
+        "initial_nav_date_used": initial["nav_date_used"] if initial else None,
+        "monthly_amount_eur": monthly_amount_eur,
+        "monthly_start_date": monthly_start_date.isoformat() if monthly_start_date else None,
+        "monthly_changes": [
+            {"effective_date": change["effective_date"].isoformat(), "amount_eur": change["amount_eur"]}
+            for change in normalized_changes
+        ],
+        "payment_records": records,
+        "payments": payments, "contributions": contributions,
+        "contribution_count": len(contributions),
+        "monthly_contribution_count": sum(item["type"] == "monthly" for item in contributions),
+        "confirmed_payment_count": sum(item["status"] == "confirmed" for item in contributions),
+        "estimated_payment_count": sum(item["status"] == "estimated" for item in contributions),
+        "skipped_payment_count": sum(item["settlement"] == "skipped" for item in payments),
+        "pending_payment_count": sum(item["settlement"] == "pending" for item in payments),
+        "total_fees_eur": sum(item["fee_eur"] for item in contributions),
+        "total_contributed_eur": total_contributed, "accumulated_units": accumulated_units,
+        "official_value_eur": official_value, "estimated_current_value_eur": estimated_value,
+        "estimated_gain_eur": gain,
+        "estimated_return_pct": gain / total_contributed * 100 if total_contributed else None,
+        "value_history": value_history,
+    }
 
 
 def select_window(points: list[MarketPoint], start: date, end: date) -> list[MarketPoint]:
@@ -198,7 +370,17 @@ def analyze_fund(
     invested_eur: float | None,
     live: bool,
     return_since: date,
+    holdings_snapshots: list[tuple[date, list[Holding]]] | None = None,
 ) -> dict[str, Any]:
+    snapshots_by_date = {
+        snapshot_date: snapshot_holdings
+        for snapshot_date, snapshot_holdings in (
+            holdings_snapshots or [(holdings_date, holdings)]
+        )
+    }
+    snapshots_by_date[holdings_date] = holdings
+    snapshots = sorted(snapshots_by_date.items(), key=lambda item: item[0])
+    holdings_date, holdings = snapshots[-1]
     metrics = nav_metrics(nav, as_of, holdings_date)
     official_nav_date = date.fromisoformat(metrics["latest_date"])
     market_end = as_of if live else min(as_of, official_nav_date)
@@ -226,14 +408,91 @@ def analyze_fund(
     aligned_contribution = sum(result.contribution_to_official_nav_pct or 0.0 for result in resolved)
     live_contribution = sum(result.contribution_since_official_nav_pct or 0.0 for result in resolved)
     normalized_return = contribution / tracked_weight * 100.0 if tracked_weight else None
-    actual_return_pct = (
+    latest_actual_return_pct = (
         metrics["since_holdings"] * 100.0 if metrics["since_holdings"] is not None else None
     )
     estimated_live_nav = metrics["latest_nav_eur"] * (1.0 + live_contribution / 100.0)
     estimated_live_return = (
-        ((1.0 + actual_return_pct / 100.0) * (1.0 + live_contribution / 100.0) - 1.0) * 100.0
-        if actual_return_pct is not None
+        ((1.0 + latest_actual_return_pct / 100.0) * (1.0 + live_contribution / 100.0) - 1.0) * 100.0
+        if latest_actual_return_pct is not None
         else None
+    )
+
+    holding_periods = []
+    period_contributions = []
+    for (snapshot_date, snapshot_holdings), (next_date, _) in zip(
+        snapshots, snapshots[1:]
+    ):
+        period_end = min(next_date, official_nav_date)
+        if snapshot_date >= period_end:
+            continue
+        period_selected = choose_holdings(snapshot_holdings, coverage_target)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            period_futures = [
+                executor.submit(
+                    analyze_holding,
+                    yahoo,
+                    item,
+                    snapshot_date,
+                    period_end,
+                    period_end,
+                    False,
+                )
+                for item in period_selected
+            ]
+            period_results = [
+                future.result()
+                for future in concurrent.futures.as_completed(period_futures)
+            ]
+        period_resolved = [
+            result for result in period_results if result.return_pct_eur is not None
+        ]
+        period_contribution = sum(
+            result.contribution_pct or 0.0 for result in period_resolved
+        )
+        period_contributions.append(period_contribution)
+        period_disclosed_weight = sum(item.weight_pct for item in snapshot_holdings)
+        period_tracked_weight = sum(item.weight_pct for item in period_resolved)
+        holding_periods.append({
+            "holdings_date": snapshot_date.isoformat(),
+            "end_date": period_end.isoformat(),
+            "position_count": len(snapshot_holdings),
+            "disclosed_equity_weight_pct": period_disclosed_weight,
+            "tracked_weight_pct": period_tracked_weight,
+            "tracked_share_of_disclosed_pct": (
+                period_tracked_weight / period_disclosed_weight * 100.0
+                if period_disclosed_weight else 0.0
+            ),
+            "estimated_equity_contribution_pct": period_contribution,
+        })
+
+    period_contributions.append(aligned_contribution)
+    holding_periods.append({
+        "holdings_date": holdings_date.isoformat(),
+        "end_date": official_nav_date.isoformat(),
+        "position_count": len(holdings),
+        "disclosed_equity_weight_pct": disclosed_weight,
+        "tracked_weight_pct": tracked_weight,
+        "tracked_share_of_disclosed_pct": (
+            tracked_weight / disclosed_weight * 100.0 if disclosed_weight else 0.0
+        ),
+        "estimated_equity_contribution_pct": aligned_contribution,
+    })
+
+    def compound_percent(values: list[float]) -> float:
+        factor = 1.0
+        for value in values:
+            factor *= 1.0 + value / 100.0
+        return (factor - 1.0) * 100.0
+
+    history_contribution = compound_percent(period_contributions)
+    live_history_contribution = compound_percent(
+        [*period_contributions[:-1], contribution]
+    )
+    history_metrics = nav_metrics(nav, as_of, snapshots[0][0])
+    history_actual_return_pct = (
+        history_metrics["since_holdings"] * 100.0
+        if history_metrics["since_holdings"] is not None else None
     )
     since_date_analysis = calculate_since_date_analysis(
         [point for point in nav if point.day <= official_nav_date],
@@ -247,6 +506,9 @@ def analyze_fund(
         "key": fund.key,
         "name": f"NLB Skladi - {fund.title}",
         "holdings_date": holdings_date.isoformat(),
+        "holdings_start_date": snapshots[0][0].isoformat(),
+        "holdings_snapshot_count": len(snapshots),
+        "holding_periods": holding_periods,
         "position_count": len(holdings),
         "disclosed_equity_weight_pct": disclosed_weight,
         "selected_position_count": len(selected),
@@ -256,14 +518,17 @@ def analyze_fund(
         "market_mode": "live" if live else "official-close",
         "market_time_earliest": market_times[0] if market_times else None,
         "market_time_latest": market_times[-1] if market_times else None,
-        "estimated_contribution_pct": contribution,
-        "aligned_contribution_pct": aligned_contribution,
+        "estimated_contribution_pct": live_history_contribution,
+        "aligned_contribution_pct": history_contribution,
         "live_contribution_since_official_nav_pct": live_contribution,
         "estimated_live_nav_eur": estimated_live_nav,
         "estimated_live_return_since_holdings_pct": estimated_live_return,
         "normalized_tracked_holdings_return_pct": normalized_return,
-        "official_return_since_holdings_pct": actual_return_pct,
-        "tracking_gap_pct": actual_return_pct - aligned_contribution if actual_return_pct is not None else None,
+        "official_return_since_holdings_pct": history_actual_return_pct,
+        "tracking_gap_pct": (
+            history_actual_return_pct - history_contribution
+            if history_actual_return_pct is not None else None
+        ),
         "metrics": metrics,
         "invested_eur": invested_eur,
         "current_value_eur": current_value,
