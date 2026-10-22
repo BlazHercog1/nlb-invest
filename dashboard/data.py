@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
+from uuid import uuid4
 
-from nlb_invest.analytics import analyze_fund, calculate_contribution_plan
-from nlb_invest.models import FUNDS
+from nlb_invest.analytics import add_months, analyze_fund, calculate_contribution_plan
+from nlb_invest.models import FUNDS, NavPoint
 from nlb_invest.nlb_client import NlbClient
 from nlb_invest.pdf_parser import extract_pdf_text, parse_holdings
+from nlb_invest.payments import (
+    has_payment_plan, normalize_plan, payment_date, plan_start,
+)
 from nlb_invest.reporting import build_investment_summary, render_text
 from nlb_invest.yahoo_client import YahooClient
 
@@ -89,7 +94,7 @@ def refresh_report(
         raise ValueError("The investment start date cannot be in the future.")
     if any(value < 0 for value in amounts.values()):
         raise ValueError("Invested amounts cannot be negative.")
-    plans = investment_plans or {}
+    plans = {key: normalize_plan(plan) for key, plan in (investment_plans or {}).items()}
     for key, plan in plans.items():
         initial_amount = float(plan.get("initial_amount_eur") or 0.0)
         monthly_amount = float(plan.get("monthly_amount_eur") or 0.0)
@@ -145,16 +150,9 @@ def refresh_report(
         fund_snapshots = parsed[key]
         holdings_date, holdings, _ = fund_snapshots[-1]
         plan = plans.get(key)
-        plan_active = bool(
-            plan and (plan.get("initial_amount_eur") or plan.get("monthly_amount_eur"))
-        )
+        plan_active = has_payment_plan(plan)
         if plan_active:
-            contribution_dates = []
-            if plan.get("initial_amount_eur"):
-                contribution_dates.append(plan["initial_date"])
-            if plan.get("monthly_amount_eur"):
-                contribution_dates.append(plan["monthly_start_date"])
-            analysis_start = min(contribution_dates)
+            analysis_start = plan_start(plan, since)
         else:
             analysis_start = since
         start = min(
@@ -187,6 +185,7 @@ def refresh_report(
                 float(plan.get("monthly_amount_eur") or 0.0),
                 plan.get("monthly_start_date"),
                 plan.get("monthly_changes"),
+                plan.get("payments"), as_of=today,
             )
             result["investment_plan"] = investment
             result["invested_eur"] = investment["total_contributed_eur"]
@@ -209,10 +208,7 @@ def refresh_report(
         "return_since": since.isoformat(), "market_mode": "live" if live else "official-close",
         "investment_mode": (
             "contribution-plan"
-            if any(
-                plan.get("initial_amount_eur") or plan.get("monthly_amount_eur")
-                for plan in plans.values()
-            )
+            if any(has_payment_plan(plan) for plan in plans.values())
             else "lump-sum"
         ),
         "coverage_target_pct": 90.0,
@@ -222,3 +218,200 @@ def refresh_report(
     write_text(TEXT_REPORT_PATH, render_text(report))
     notify(total_steps, "Report saved.")
     return report
+
+
+def _commit_payment_files(contents: dict[Path, str]) -> None:
+    """Stage every file before replacing any; restore previous files on failure."""
+    previous = {path: path.read_bytes() if path.exists() else None for path in contents}
+    staged, replaced = {}, []
+    try:
+        for path, content in contents.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+            staged[path] = temporary
+            temporary.write_text(content, encoding="utf-8")
+        for path, temporary in staged.items():
+            temporary.replace(path)
+            replaced.append(path)
+    except OSError:
+        for path in reversed(replaced):
+            if previous[path] is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(previous[path])
+        raise
+    finally:
+        for temporary in staged.values():
+            temporary.unlink(missing_ok=True)
+
+
+def save_payment_change(report: dict, settings: dict, fund_key: str,
+                        record: dict | None = None, *, reset_id: str | None = None) -> dict:
+    """Revalue one fund with cached prices; never fetch new market data."""
+    updated = deepcopy(report)
+    saved = deepcopy(settings)
+    fund = next(f for f in updated["funds"] if f["key"] == fund_key)
+    old_plan = fund.get("investment_plan")
+    if not old_plan or not fund.get("nav_history"):
+        raise ValueError("Refresh this fund once to load the NLB price history before editing payments.")
+    configured = saved.get("plans", {}).get(fund_key)
+    raw_plan = deepcopy(configured or {
+        key: old_plan[key] for key in (
+            "initial_amount_eur", "initial_date", "monthly_amount_eur",
+            "monthly_start_date", "monthly_changes",
+        ) if key in old_plan
+    })
+    records = deepcopy(
+        configured.get("payments", old_plan.get("payment_records", []))
+        if configured else old_plan.get("payment_records", [])
+    )
+    identifier = reset_id or (record or {}).get("id")
+    if not identifier:
+        raise ValueError("Choose a payment to update.")
+    records = [item for item in records if item["id"] != identifier]
+    if record is not None:
+        records.append(record)
+    raw_plan["payments"] = records
+    plan = normalize_plan(raw_plan)
+    nav = [NavPoint(date.fromisoformat(p["date"]), p["nav"], None, {})
+           for p in fund["nav_history"]]
+    earliest = plan_start(plan, date.fromisoformat(updated["return_since"]))
+    if earliest < nav[0].day - timedelta(days=7):
+        raise ValueError("This payment predates the saved NLB history. Use a date covered by the saved report.")
+    if has_payment_plan(plan):
+        investment = calculate_contribution_plan(
+            nav, fund["estimated_live_nav_eur"],
+            plan["initial_amount_eur"], plan["initial_date"],
+            plan["monthly_amount_eur"], plan.get("monthly_start_date"),
+            plan.get("monthly_changes"), plan.get("payments"),
+            as_of=date.fromisoformat(updated["as_of"]),
+        )
+        fund["investment_plan"] = investment
+        fund["invested_eur"] = investment["total_contributed_eur"]
+        fund["current_value_eur"] = investment["estimated_current_value_eur"]
+    else:
+        fund.pop("investment_plan", None)
+        fund["invested_eur"] = None
+        fund["current_value_eur"] = None
+    updated["investment_mode"] = (
+        "contribution-plan" if any(f.get("investment_plan") for f in updated["funds"]) else "lump-sum"
+    )
+    updated["investment_summary"] = build_investment_summary(updated["funds"])
+    updated["payments_updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    # Keep dates as JSON strings in saved settings.
+    raw_plan["payments"] = plan["payments"]
+    saved.setdefault("plans", {})[fund_key] = {
+        **raw_plan,
+        "initial_date": plan["initial_date"].isoformat(),
+        "monthly_start_date": (
+            plan["monthly_start_date"].isoformat() if plan["monthly_start_date"] else None
+        ),
+        "monthly_changes": [
+            {"effective_date": change["effective_date"].isoformat(), "amount_eur": change["amount_eur"]}
+            for change in plan["monthly_changes"]
+        ],
+    }
+    _commit_payment_files({
+        SETTINGS_PATH: json.dumps(saved, ensure_ascii=False, indent=2),
+        REPORT_PATH: json.dumps(updated, ensure_ascii=False, indent=2),
+        TEXT_REPORT_PATH: render_text(updated),
+    })
+    return updated
+
+
+def prefer_newer_report(current: dict | None, saved: dict | None) -> dict | None:
+    """Pick up scheduled tracker refreshes while a dashboard session is open."""
+    def timestamp(report):
+        if not report:
+            return 0
+        return max((datetime.fromisoformat(report[field]).timestamp()
+                    for field in ("generated_at", "payments_updated_at") if report.get(field)),
+                   default=0)
+    return saved if timestamp(saved) > timestamp(current) else current or saved
+
+
+def recurring_refresh_needed(report: dict | None, settings: dict, today: date | None = None) -> bool:
+    """Fetch prices for due purchases once per day, preserving payment exceptions."""
+    today = today or date.today()
+    if not report or payment_date(report["as_of"]) >= today:
+        return False
+    for fund in report["funds"]:
+        old_plan = fund.get("investment_plan") or {}
+        plan = settings.get("plans", {}).get(fund["key"]) or old_plan
+        if not plan.get("monthly_amount_eur") or not plan.get("monthly_start_date"):
+            continue
+        records = {p["id"]: p for p in plan.get("payments", old_plan.get("payment_records", []))
+                   if "id" in p}
+        rows = old_plan.get("payments", old_plan.get("contributions", []))
+        known = {p.get("id", f"{p['type']}:{p['scheduled_date']}"): p for p in rows}
+        start = payment_date(plan["monthly_start_date"])
+        index, due = 0, start
+        while due <= today:
+            identifier = "monthly:" + due.isoformat()
+            override = records.get(identifier, {})
+            row = known.get(identifier, {})
+            requested = payment_date(
+                override.get("actual_date") or row.get("actual_date") or due
+            )
+            if (override.get("status", row.get("status")) != "skipped"
+                    and requested <= today
+                    and (identifier not in known or row.get("settlement") == "pending")):
+                return True
+            index += 1
+            due = add_months(start, index)
+    return False
+
+
+def refresh_recurring_report(report: dict, settings: dict, *, on_progress=None) -> dict:
+    """Use the saved plan and reports to catch up recurring purchases and prices."""
+    names = settings.get("pdfs") or report.get("source_pdfs") or [report["source_pdf"]]
+    pdfs = []
+    for name in names:
+        filename = Path(name).name
+        path = next((candidate for candidate in (ROOT / filename, LOCAL / filename)
+                     if candidate.is_file()), None)
+        if path is None:
+            raise ValueError(f"Monthly report is missing: {filename}. Choose it and click Refresh.")
+        if path not in pdfs:
+            pdfs.append(path)
+    plans = settings.get("plans") or {
+        fund["key"]: {
+            **fund["investment_plan"],
+            "payments": fund["investment_plan"].get("payment_records", []),
+        }
+        for fund in report["funds"] if fund.get("investment_plan")
+    }
+    return refresh_report(
+        pdfs, payment_date(settings.get("return_since") or report["return_since"]),
+        settings.get("amounts", {}), settings.get("live", report.get("market_mode") == "live"),
+        plans, on_progress=on_progress,
+    )
+
+
+def show_due_payments(report: dict, settings: dict, today: date | None = None) -> dict:
+    """Expose due but unpriced payments after a failed refresh, without inventing prices."""
+    updated = deepcopy(report)
+    today = today or date.today()
+    for fund in updated["funds"]:
+        old_plan = fund.get("investment_plan")
+        if not old_plan or not fund.get("nav_history"):
+            continue
+        raw = settings.get("plans", {}).get(fund["key"]) or {
+            **old_plan, "payments": old_plan.get("payment_records", []),
+        }
+        plan = normalize_plan(raw)
+        if not has_payment_plan(plan):
+            continue
+        investment = calculate_contribution_plan(
+            [NavPoint(payment_date(p["date"]), p["nav"], None, {}) for p in fund["nav_history"]],
+            fund["estimated_live_nav_eur"],
+            plan["initial_amount_eur"], plan["initial_date"],
+            plan["monthly_amount_eur"], plan.get("monthly_start_date"),
+            plan.get("monthly_changes"), plan.get("payments"), as_of=today,
+        )
+        fund["investment_plan"] = investment
+        fund["invested_eur"] = investment["total_contributed_eur"]
+        fund["current_value_eur"] = investment["estimated_current_value_eur"]
+    updated["investment_summary"] = build_investment_summary(updated["funds"])
+    updated["schedule_as_of"] = today.isoformat()
+    return updated

@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from .models import FUNDS
+from .payments import monthly_story, story_months
 
 
 def fmt_pct(value: float | None, decimals: int = 2) -> str:
@@ -46,7 +47,7 @@ def render_investment_summary(report: dict[str, Any]) -> list[str]:
         "MY INVESTMENTS",
         "--------------",
         *(
-            ["Includes each initial investment and the scheduled monthly contributions shown below."]
+            ["Includes initial, monthly and extra payments. Unconfirmed scheduled payments are estimates."]
             if contribution_plans
             else [f"Based on money invested since: {report['return_since']}"]
         ),
@@ -154,6 +155,33 @@ def render_text(report: dict[str, Any]) -> str:
                     f"Monthly amount changes to {fmt_eur(change['amount_eur'])} "
                     f"from {change['effective_date']}"
                 )
+            if "payments" in plan:
+                lines.append(
+                    f"Payments included: {plan['confirmed_payment_count']} confirmed, "
+                    f"{plan['estimated_payment_count']} estimated; "
+                    f"{plan['skipped_payment_count']} skipped, {plan['pending_payment_count']} pending."
+                )
+                lines.append(f"Fees included in gain/loss: {fmt_eur(plan['total_fees_eur'])}")
+                months = story_months([fund])
+                if months:
+                    story = monthly_story([fund], months[-1])
+                    lines.append(
+                        f"Monthly story {story['month']} through {story['through']}: "
+                        f"added {fmt_eur(story['added_eur'])}; "
+                        f"investment gain/loss {fmt_eur(story['gain_eur'])}; "
+                        f"balance change {fmt_eur(story['balance_change_eur'])}."
+                    )
+                lines.append(f"Payment history (valued at official NAV on {metrics['latest_date']}):")
+                for payment in plan["payments"]:
+                    value = payment.get("official_value_eur")
+                    gain = payment.get("official_gain_eur")
+                    lines.append(
+                        f"  {payment['scheduled_date']} {payment['type']} "
+                        f"[{payment['status']}; {payment['settlement']}] "
+                        f"paid {fmt_eur(payment['amount_eur'])}; "
+                        f"fee {fmt_eur(payment.get('fee_eur', 0))}; "
+                        f"value {fmt_eur(value)}; gain/loss {fmt_eur(gain)}"
+                    )
         since = fund["return_since_date"]
         end_label = "Estimated live" if live else "Official close"
         lines.extend(

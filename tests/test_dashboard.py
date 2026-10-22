@@ -290,6 +290,13 @@ class DashboardChartTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("streamlit") and importlib.util.find_spec("plotly"), "Optional dashboard dependencies are not installed")
 class DashboardInterfaceTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        patcher = patch.object(data, "TEXT_REPORT_PATH", Path(directory.name) / "latest_report.txt")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_contribution_plan_shows_chart_and_transaction_history(self):
         from streamlit.testing.v1 import AppTest
 
@@ -334,10 +341,13 @@ class DashboardInterfaceTests(unittest.TestCase):
 
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(len(app.get("plotly_chart")), 2)
-        self.assertEqual(len(app.dataframe), 2)
-        self.assertEqual(app.dataframe[0].value.iloc[0]["Type"], "Initial")
-        self.assertEqual(app.dataframe[0].value.iloc[1]["Amount (EUR)"], 100)
-        self.assertEqual(app.dataframe[0].value.iloc[0]["15-year holding date"], "2041-07-20")
+        self.assertEqual(len(app.dataframe), 3)
+        transactions = next(frame.value for frame in app.dataframe if "Type" in frame.value.columns)
+        self.assertEqual(transactions.iloc[0]["Type"], "Initial")
+        self.assertEqual(transactions.iloc[1]["Amount (EUR)"], 100)
+        self.assertEqual(transactions.iloc[0]["15-year holding date"], "2041-07-20")
+        self.assertEqual(transactions.iloc[1]["Status"], "Estimated")
+        self.assertAlmostEqual(transactions.iloc[0]["Current value (EUR)"], 2000)
 
     def test_inputs_require_refresh_and_failed_refresh_keeps_results(self):
         import streamlit as st

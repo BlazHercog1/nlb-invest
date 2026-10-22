@@ -12,6 +12,7 @@ from .analytics import analyze_fund, calculate_contribution_plan
 from .models import FUNDS
 from .nlb_client import NlbClient
 from .pdf_parser import extract_pdf_text, parse_holdings
+from .payments import has_payment_plan, normalize_plan, plan_start
 from .reporting import build_investment_summary, render_text
 from .yahoo_client import YahooClient
 
@@ -107,22 +108,7 @@ def load_investment_plans(path: Path | None) -> dict[str, dict[str, Any]]:
     for key, raw_plan in raw_plans.items():
         if key not in FUNDS or not isinstance(raw_plan, dict):
             continue
-        plan = dict(raw_plan)
-        plan["initial_amount_eur"] = float(plan.get("initial_amount_eur") or 0.0)
-        plan["monthly_amount_eur"] = float(plan.get("monthly_amount_eur") or 0.0)
-        if plan.get("initial_date"):
-            plan["initial_date"] = date.fromisoformat(plan["initial_date"])
-        if plan.get("monthly_start_date"):
-            plan["monthly_start_date"] = date.fromisoformat(
-                plan["monthly_start_date"]
-            )
-        plan["monthly_changes"] = [
-            {
-                "effective_date": date.fromisoformat(change["effective_date"]),
-                "amount_eur": float(change["amount_eur"]),
-            }
-            for change in plan.get("monthly_changes", [])
-        ]
+        plan = normalize_plan(raw_plan)
         plans[key] = plan
     return plans
 
@@ -165,18 +151,10 @@ def main(argv: list[str] | None = None) -> int:
                 first_holdings_date - timedelta(days=7),
             )
             plan = contribution_plans.get(key)
-            plan_active = bool(
-                plan
-                and (plan.get("initial_amount_eur") or plan.get("monthly_amount_eur"))
-            )
+            plan_active = has_payment_plan(plan)
             analysis_start = args.return_since
             if plan_active:
-                contribution_dates = []
-                if plan.get("initial_amount_eur"):
-                    contribution_dates.append(plan["initial_date"])
-                if plan.get("monthly_amount_eur"):
-                    contribution_dates.append(plan["monthly_start_date"])
-                analysis_start = min(contribution_dates)
+                analysis_start = plan_start(plan, args.return_since)
                 nav_start = min(nav_start, analysis_start - timedelta(days=7))
             nav = nlb.get_nav_history(fund, nav_start, args.as_of)
             invested_eur = {
@@ -215,12 +193,20 @@ def main(argv: list[str] | None = None) -> int:
                     plan["monthly_amount_eur"],
                     plan.get("monthly_start_date"),
                     plan.get("monthly_changes"),
+                    plan.get("payments"), as_of=args.as_of,
                 )
                 reports[-1]["investment_plan"] = investment
                 reports[-1]["invested_eur"] = investment["total_contributed_eur"]
                 reports[-1]["current_value_eur"] = investment[
                     "estimated_current_value_eur"
                 ]
+            official_end = date.fromisoformat(
+                reports[-1].get("metrics", {}).get("latest_date", args.as_of.isoformat())
+            )
+            reports[-1]["nav_history"] = [
+                {"date": point.day.isoformat(), "nav": point.nav}
+                for point in nav if point.day <= official_end
+            ]
             sources_by_date = {
                 snapshot_date.isoformat(): source_name
                 for snapshot_date, _, source_name in fund_snapshots

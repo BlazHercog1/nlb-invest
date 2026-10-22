@@ -108,7 +108,7 @@ py -3 -m unittest discover -s tests -v
 
 ## Keep it current
 
-`run_tracker.ps1` updates `latest_report.txt`. To run it each weekday at 19:00, open Task Scheduler, create a basic task, and use:
+`run_tracker.ps1` updates `latest_report.txt` and `local/dashboard_report.json`, so scheduled refreshes also update the browser dashboard. To run it each weekday at 19:00, open Task Scheduler, create a basic task, and use:
 
 - Program: `powershell.exe`
 - Arguments: `-NoProfile -ExecutionPolicy Bypass -File "C:\path\to\Finance\run_tracker.ps1"`
@@ -170,8 +170,32 @@ or after its date. Because every EUR 50 payment buys fund units, its actual valu
 is driven by NLB's NAV history; it does not remain tied to the holdings mix from
 the month when it was paid. The dashboard shows total contributions, estimated investment
 values, a contribution-versus-value chart, the generated transaction history,
-official NAV performance charts and the disclosed holdings. This basic plan does
-not support skipped or extra payments, fees, or withdrawals. It records the
+official NAV performance charts and the disclosed holdings.
+
+**Your monthly story** separates added money from investment earnings. Choose a
+month to see opening and closing values and a breakdown by fund. The current
+month ends at the latest common published NLB date; deposits count on their
+purchase/NAV date, and entered fees reduce earnings.
+
+Under **My contributions > Manage payments**, confirm, skip or edit a scheduled
+payment, restore its estimate, or add an extra payment. Enter the amount paid
+(including any fee), the purchase date, and optionally the actual units received
+from your statement. If units are omitted, they are estimated as
+(amount paid - fee) / first published NAV on or after the purchase date.
+Confirmed payments verify that a payment happened; their units may still be
+estimated. Skipped payments and payments awaiting a published NAV are excluded
+from the balance. Recorded payments survive later plan changes.
+
+Payment edits recalculate the saved report immediately with existing prices and
+update the text/JSON exports; they do not fetch new market data. Click **Refresh**
+to get new prices. The scheduled CLI refresh reuses these same payment records and saves a dashboard
+snapshot with NAV history. An open dashboard picks up newer snapshots on its
+next interaction.
+The transaction history shows each payment's current value, euro gain/loss and
+return using the latest published NLB NAV. Existing saved plans continue to work
+and their generated payments are marked Estimated. Withdrawals are not supported.
+
+The dashboard records the
 15-year holding date for each payment under the tax explanation currently
 published by NLB; this is informational and is not a tax calculation. A refresh
 can take a few minutes.
@@ -186,11 +210,17 @@ Files are downloaded through your browser as `latest_report.txt` and
 
 Settings, uploaded PDFs and the last successful dashboard report are stored in
 the ignored `local/` directory. Reopening the dashboard shows saved results;
-no network refresh occurs until you click Refresh. It can also display an existing
+when a new monthly payment is due, the dashboard automatically refreshes the
+saved plan and prices on opening or rerunning. A payment on the 15th repeats on
+the 15th of every month; the original date is its first occurrence. The overview
+shows the latest included monthly payment and the next scheduled payment.
+If prices are unavailable, due payments remain visible as pending NAV; no earlier
+price is substituted. Automatic checks retry on the next day, and **Refresh**
+can retry immediately. It can also display an existing
 `latest_report.json`; refresh once to add chart history. A successful dashboard
 refresh also updates the root `latest_report.txt`, including initial and monthly
 contributions, their estimated current values, and the resulting gain or loss.
-A failed refresh keeps the previous results visible.
+A failed refresh keeps the previous results visible. Invalid payment edits leave saved results unchanged.
 
 ## NLB savings-plan rules represented in the dashboard
 

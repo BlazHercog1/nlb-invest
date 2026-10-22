@@ -6,10 +6,13 @@ import streamlit as st
 
 from dashboard.data import (
     DEFAULT_DATE, LOCAL, ROOT, SETTINGS_PATH, load_report, load_settings,
-    refresh_report, report_exports, write_json,
+    prefer_newer_report, recurring_refresh_needed, refresh_recurring_report,
+    refresh_report, report_exports, show_due_payments, write_json,
 )
 from nlb_invest.analytics import add_months
+from dashboard.payments import render_monthly_story, render_payment_history, render_payment_manager
 from nlb_invest.models import FUNDS
+from nlb_invest.payments import monthly_schedule
 from nlb_invest.reporting import fmt_eur, fmt_pct_value
 
 
@@ -165,8 +168,11 @@ def main():
     st.set_page_config(page_title="My NLB investments", page_icon="📈", layout="wide")
     st.title("My NLB investments")
     st.caption("Your three funds, in one place.")
-    if "report" not in st.session_state:
-        st.session_state.report = load_report()
+    if notice := st.session_state.pop("payment_notice", None):
+        st.success(notice)
+    st.session_state.report = prefer_newer_report(
+        st.session_state.get("report"), load_report(),
+    )
     settings = load_settings()
 
     with st.sidebar:
@@ -213,9 +219,14 @@ def main():
                         step=10.0, format="%.2f", key="monthly_amount_" + key,
                     )
                     monthly_start = st.date_input(
-                        "First monthly contribution date", value=default_monthly_start,
+                        "First payment date (repeats every month)", value=default_monthly_start,
                         key="monthly_start_" + key,
                     )
+                    if monthly_amount:
+                        st.caption(
+                            f"Invests EUR {monthly_amount:,.2f} every month on day "
+                            f"{monthly_start.day}, starting {monthly_start.isoformat()}."
+                        )
                     changed_monthly_amount = st.number_input(
                         "Changed monthly amount (EUR; 0 for no change)", min_value=0.0,
                         max_value=500.0, value=float(saved_change.get("amount_eur", 0.0)),
@@ -233,6 +244,7 @@ def main():
                     "initial_amount_eur": initial_amount,
                     "initial_date": initial_date,
                     "monthly_amount_eur": monthly_amount,
+                    "payments": saved_plan.get("payments", []),
                     "monthly_start_date": monthly_start,
                     "monthly_changes": ([{
                         "effective_date": change_date,
@@ -314,6 +326,7 @@ def main():
                             "initial_amount_eur": plan["initial_amount_eur"],
                             "initial_date": plan["initial_date"].isoformat(),
                             "monthly_amount_eur": plan["monthly_amount_eur"],
+                            "payments": plan.get("payments", []),
                             "monthly_start_date": plan["monthly_start_date"].isoformat(),
                             "monthly_changes": [
                                 {
@@ -337,6 +350,33 @@ def main():
             st.error(f"Could not refresh: {exc}")
             st.info("Your previous report is still shown below. Check the PDF and your internet connection, then retry.")
 
+    if not submitted and recurring_refresh_needed(st.session_state.report, settings):
+        previous = st.session_state.report
+        attempt = (previous["generated_at"], date.today().isoformat())
+        if st.session_state.get("recurring_refresh_attempt") != attempt:
+            st.session_state.recurring_refresh_attempt = attempt
+            progress = st.progress(0.0, text="Including your latest monthly payment...")
+            try:
+                with st.spinner("Updating recurring payments and their fund prices..."):
+                    st.session_state.report = refresh_recurring_report(
+                        previous, settings,
+                        on_progress=lambda value, message: progress.progress(value, text=message),
+                    )
+                st.session_state.pop("recurring_refresh_error", None)
+                st.success("Your monthly payments are up to date.")
+            except (ValueError, RuntimeError, OSError) as exc:
+                st.session_state.report = show_due_payments(previous, settings)
+                st.session_state.recurring_refresh_error = str(exc)
+            finally:
+                progress.empty()
+    if submitted:
+        st.session_state.pop("recurring_refresh_error", None)
+    elif error := st.session_state.get("recurring_refresh_error"):
+        st.warning(
+            f"Could not fetch prices for the latest monthly payment: {error}. "
+            "Due payments are shown as pending NAV. Click Refresh to retry."
+        )
+
     report = st.session_state.report
     if not report:
         st.info("Enter your invested amounts, choose a monthly report, and click Refresh to get started.")
@@ -349,7 +389,7 @@ def main():
     )
     if date.fromisoformat(report["as_of"]) < date.today():
         st.info("These are saved results from an earlier day. Click Refresh for the latest available data.")
-    st.caption("Results and downloads use the settings from the last successful refresh.")
+    st.caption("Prices come from the last successful refresh. Payment edits update the saved balances and downloads.")
     text_export, json_export = report_exports(report)
     export_columns = st.columns(2)
     with export_columns[0]:
@@ -370,7 +410,7 @@ def main():
 
     has_plans = any(fund.get("investment_plan") for fund in report["funds"])
     st.header("Official NLB data")
-    st.caption("Published NLB NAV values only. No live market estimates are included here.")
+    st.caption("Valued at published NLB unit prices. Scheduled payments remain estimates until confirmed.")
     official_summary = portfolio_snapshot(report["funds"], live=False)
     if official_summary["contributed_eur"] > 0:
         cols = st.columns(3)
@@ -401,7 +441,9 @@ def main():
                 st.metric("Official return", fmt_pct_value(analysis["official_return_pct"]))
             if plan:
                 monthly_text = (
-                    f"EUR {plan['monthly_amount_eur']:,.2f}/month from {plan['monthly_start_date']}"
+                    f"EUR {plan['monthly_amount_eur']:,.2f} every month on day "
+                    f"{date.fromisoformat(plan['monthly_start_date']).day} "
+                    f"(first payment {plan['monthly_start_date']})"
                     if plan["monthly_amount_eur"]
                     else "no monthly contribution"
                 )
@@ -423,6 +465,27 @@ def main():
                     f"Contributions included: {plan['contribution_count']} | "
                     f"Total paid: {fmt_eur(plan['total_contributed_eur'])}"
                 )
+                schedule = monthly_schedule(plan, date.today())
+                if schedule:
+                    included = [
+                        p for p in plan["contributions"] if p["type"] == "monthly"
+                    ]
+                    latest = max((p["scheduled_date"] for p in included), default="none yet")
+                    st.caption(
+                        f"Latest monthly payment included: {latest}. "
+                        f"Next scheduled payment: {schedule['next_date']} "
+                        f"({fmt_eur(schedule['next_amount_eur'])})."
+                    )
+                    pending = [
+                        p for p in plan.get("payments", [])
+                        if p.get("settlement") == "pending" and p["type"] == "monthly"
+                    ]
+                    if pending:
+                        due = max(pending, key=lambda p: p["scheduled_date"])
+                        st.info(
+                            f"Payment on {due['scheduled_date']} "
+                            f"({fmt_eur(due['amount_eur'])}) is awaiting a published NLB price."
+                        )
             st.caption(
                 f"Official NAV: {fmt_eur(fund['metrics']['latest_nav_eur'])} · "
                 f"{fund['metrics']['latest_date']}\n\n"
@@ -437,6 +500,8 @@ def main():
     else:
         st.info("Click Refresh to load the official performance chart.")
 
+    st.divider()
+    render_monthly_story(report)
     st.divider()
     st.header("Live market estimates")
     st.caption(
@@ -510,29 +575,8 @@ def main():
             "The chart uses published NLB NAV values. Scheduled payments without a published "
             "NAV yet are not included."
         )
-        st.markdown("#### Transaction history")
-        transactions = [{
-            "Type": "Initial" if item["type"] == "initial" else "Monthly",
-            "Scheduled date": item["scheduled_date"],
-            "NAV date used": item["nav_date_used"],
-            "Amount (EUR)": item["amount_eur"],
-            "NAV (EUR)": item["nav_eur"],
-            "Units": item["units"],
-            "15-year holding date": item.get("fifteen_year_holding_date")
-            or add_months(date.fromisoformat(item["nav_date_used"]), 180).isoformat(),
-        } for item in plan["contributions"]]
-        st.caption(
-            "The 15-year date is informational and follows NLB's currently published "
-            "tax explanation. Tax rules and individual circumstances may change."
-        )
-        st.dataframe(
-            transactions, width="stretch", hide_index=True,
-            column_config={
-                "Amount (EUR)": st.column_config.NumberColumn(format="%.2f"),
-                "NAV (EUR)": st.column_config.NumberColumn(format="%.4f"),
-                "Units": st.column_config.NumberColumn(format="%.6f"),
-            },
-        )
+        render_payment_history(contribution_fund)
+        render_payment_manager(report, settings, contribution_fund)
 
     st.subheader("Holdings")
     keys = [fund["key"] for fund in report["funds"]]
